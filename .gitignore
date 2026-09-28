@@ -5,11 +5,11 @@
 # 本地工作目录
 .workbuddy/
 
-# 暂不分发：Linux 版实现与本地文档
+# 开发脚手架与本地文档，不随仓库分发
+spike/
 kylin/
 docs/
-spike/test_kylin.py
-spike/test_kylin_e2e.py
+build/_kill_bridge.py
 
 # ============================================================
 # 编译产物

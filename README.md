@@ -41,18 +41,24 @@
 
 ## 快速开始
 
-需要 .NET Framework 4.x（Windows 10/11 自带）。用系统自带的 `csc.exe` 编译，不需要装 Visual Studio：
+### 下载即用（推荐）
+
+到 [Releases](https://gitee.com/lanyacp/TypeBridge/releases) 下载 `TypeBridge.exe`，双击运行。不用编译，不用装任何东西。
+
+1. 程序自动弹出一个配对页，上面有二维码
+2. 手机连上同一个 WiFi，用微信扫一扫，或者系统相机扫码
+3. 手机页面上出现绿点「已连接」，就可以打字了
+4. 打字，点发送，字落到电脑光标处
+
+### 自己编译
+
+需要 .NET Framework 4.x（Windows 10/11 自带）。用系统自带的 `csc.exe`，不需要装 Visual Studio：
 
 ```bat
 build\build_stage1.bat
 ```
 
-编译出 `build\TypeBridge.exe`（90KB）。**双击它就行**，不需要命令行：
-
-1. 程序启动后自动弹出一个配对页，上面有二维码
-2. 手机连上同一个 WiFi，用微信扫一扫，或者系统相机扫码
-3. 手机页面上出现绿点「已连接」，就可以打字了
-4. 打字，点发送，字落到电脑光标处
+编译产物在 `build\TypeBridge.exe`（90KB），**双击它就行**，不需要命令行。
 
 程序运行期间右下角托盘常驻一个图标。右键它可以选择：
 
@@ -134,37 +140,19 @@ src/
     qrcode.js          二维码生成库
 build/
   build_stage1.bat     编译脚本，调系统 csc.exe
-  _kill_bridge.py      编译前清理旧进程。旧进程占着 exe 会让编译报错
-spike/
-  inject_test.cs       阶段 0 的注入内核验证程序，带窗口选择器和目标校验
-  verify_sendinput.py  静态验证 ctypes 调用 SendInput 的绑定是否正确
-  test_ws_pairing.py   WebSocket 配对链路冒烟
-  test_sync.py         实时同步指令冒烟
 ```
 
-## 开发与测试
+## 开发
 
 改完代码后重新编译：
 
 ```bat
-python build\_kill_bridge.py    # 编译报「另一个程序正在使用此文件」时，先跑这个
 build\build_stage1.bat
 ```
 
-测试脚本都写成了可以独立运行的，不需要测试框架。前两个需要程序正在运行：
+有个坑值得先说：如果编译报「另一个程序正在使用此文件」，那是上一次运行的 `TypeBridge.exe` 还占着文件。从托盘菜单退出它，再编译。
 
-```bash
-python spike/test_ws_pairing.py    # 配对链路：错码拒绝、对码放行、ping-pong
-python spike/test_sync.py          # 实时同步指令
-```
-
-一个重要的提醒：**注入类测试必须保证不产生真实注入**（让退格数为 0 或负数），否则会往你当前的前台窗口里灌字或者狂按退格。写这类测试时先想清楚最坏情况会发生什么。
-
-`spike/inject_test.cs` 是阶段 0 留下的验证程序，用来单独确认 SendInput 注入在这台机器上能不能工作。它会先列出当前打开的窗口让你挑一个作目标，注入前再校验一次前台窗口对不对，打错地方会自己拦下。它没有配套的编译脚本，需要手动编译：
-
-```bat
-%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe /target:exe /out:spike\inject_test.exe spike\inject_test.cs
-```
+源码顶部的注释里记了几个绕不过去的技术点（C# 5 语法限制、源文件必须带 BOM、x64 下 `sizeof(INPUT)` 是 40 字节），动手改之前值得先看一眼。
 
 ## 许可
 

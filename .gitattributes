@@ -1,10 +1,13 @@
-# 统一用 LF 存储、也用 LF 检出。
+# 换行符按平台惯例来，不依赖每个人的 core.autocrlf 设置。
 #
-# 原因：仓库里有 Linux 脚本（kylin/run.sh、docs/check_kylin.sh）。
-# 带 CRLF 的 shell 脚本在 Linux 上会报 "\r: command not found"，
-# 或者 shebang 直接失效。这里显式写死，就不必依赖每个人的
-# core.autocrlf 设置了。
-* text=auto eol=lf
+# C# 源码和批处理脚本保持 Windows 的 CRLF。批处理尤其重要，
+# 某些情况下 cmd.exe 读 LF 结尾的 .bat 会出错。编译器本身不在乎
+# 换行符，但检出后和作者本地的文件保持一致，diff 才干净。
+*.cs   text eol=crlf
+*.bat  text eol=crlf
+
+# 其余文本统一按 LF 存储
+* text=auto
 
 # 二进制文件不做任何换行符处理
 *.exe binary
