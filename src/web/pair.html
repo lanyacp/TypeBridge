@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TypeBridge 配对</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:640px;margin:32px auto;padding:0 20px;color:#222;line-height:1.7;text-align:center}
+h1{font-size:22px;margin-bottom:6px}
+.sub{color:#666;font-size:14px;margin-bottom:18px}
+#qrbox{display:inline-block;background:#fff;border:1px solid #d8d8d8;border-radius:12px;padding:18px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+canvas{display:block}
+#status{margin-top:14px;font-size:14px;color:#185fa5}
+#fallback{margin-top:16px;font-size:13px;color:#666}
+#fallback code{background:#f2f2f2;padding:3px 8px;border-radius:4px;font-family:Consolas,monospace;word-break:break-all;display:inline-block;margin-top:6px}
+.warn{background:#fff3f0;border:1px solid #f0b8ad;color:#a3341f;border-radius:8px;padding:12px 14px;font-size:13.5px;text-align:left;margin:0 0 18px;line-height:1.6}
+.warn code{background:#fff;padding:2px 6px;border-radius:4px;font-family:Consolas,monospace}
+.tip{color:#888;font-size:13px;margin-top:16px}
+</style>
+</head>
+<body>
+<h1>手机扫码连接</h1>
+<div class="sub">用手机（与电脑同一 WiFi）的微信「扫一扫」或系统相机扫码</div>
+<!--WARN-->
+<div id="qrbox"><canvas id="qr"></canvas></div>
+<div id="status">正在生成二维码…</div>
+<div id="fallback">
+  扫码不成功？在手机浏览器地址栏输入：<br>
+  <code>{{URL}}</code>
+</div>
+<div class="tip">打开后页面出现绿点「已连接」，即可在手机上打字或说话，文字直达电脑光标处。</div>
+<script src="/qrcode.js"></script>
+<script>
+var PAIR_URL = "{{URL}}";
+(function () {
+  var statusEl = document.getElementById('status');
+  try {
+    var qr = qrcode(0, 'M');
+    qr.addData(PAIR_URL);
+    qr.make();
+    var count = qr.getModuleCount();
+    var scale = Math.max(4, Math.floor(280 / count));
+    var border = 4;
+    var size = (count + border * 2) * scale;
+    var canvas = document.getElementById('qr');
+    canvas.width = size;
+    canvas.height = size;
+    var ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, size, size);
+    ctx.fillStyle = '#000000';
+    for (var row = 0; row < count; row++) {
+      for (var col = 0; col < count; col++) {
+        if (qr.isDark(row, col)) {
+          ctx.fillRect((col + border) * scale, (row + border) * scale, scale, scale);
+        }
+      }
+    }
+    statusEl.textContent = '二维码已就绪，请用手机扫码';
+  } catch (e) {
+    statusEl.textContent = '二维码生成失败，请使用下方地址手动输入';
+  }
+})();
+</script>
+</body>
+</html>

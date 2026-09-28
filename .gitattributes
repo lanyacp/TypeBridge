@@ -1,0 +1,13 @@
+# 统一用 LF 存储、也用 LF 检出。
+#
+# 原因：仓库里有 Linux 脚本（kylin/run.sh、docs/check_kylin.sh）。
+# 带 CRLF 的 shell 脚本在 Linux 上会报 "\r: command not found"，
+# 或者 shebang 直接失效。这里显式写死，就不必依赖每个人的
+# core.autocrlf 设置了。
+* text=auto eol=lf
+
+# 二进制文件不做任何换行符处理
+*.exe binary
+*.png binary
+*.ico binary
+*.jpg binary
