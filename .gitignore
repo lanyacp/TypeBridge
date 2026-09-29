@@ -1,0 +1,17 @@
+# 便携工具与临时文件
+tools/
+*.zip
+
+# 会话/内部数据（隐私，不公开）
+memory/
+.workbuddy/
+
+# 测试与过程产物（_ 开头的临时脚本/截图）
+spike/_shots/
+spike/_shots2/
+spike/_*.py
+docs/_*.py
+docs/_*.html
+
+# 日志
+*.log
