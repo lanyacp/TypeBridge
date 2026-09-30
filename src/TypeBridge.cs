@@ -312,7 +312,12 @@ namespace TypeBridge
                 {
                     if (k == null) return false;
                     object v = k.GetValue(ValueName);
-                    return v != null && string.Equals((string)v, ExePath, StringComparison.OrdinalIgnoreCase);
+                    if (v == null) return false;
+                    string s = (string)v;
+                    // 写入时包了一层引号（兼容路径带空格），比较前剥掉
+                    if (s.Length >= 2 && s[0] == '"' && s[s.Length - 1] == '"')
+                        s = s.Substring(1, s.Length - 2);
+                    return string.Equals(s, ExePath, StringComparison.OrdinalIgnoreCase);
                 }
             }
             catch (Exception) { return false; }
