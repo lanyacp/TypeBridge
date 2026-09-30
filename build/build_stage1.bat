@@ -19,7 +19,9 @@ if not exist build mkdir build
 rem NOTE: src\TypeBridge.cs must be UTF-8 WITH BOM (csc reads BOM-less
 rem       UTF-8 as ANSI/GBK and corrupts Chinese string literals)
 
-"%CSC%" /nologo /optimize+ /platform:x64 /target:winexe ^
+rem AnyCPU：同一 exe 同时跑 32 位/64 位系统（Win7 有 32 位老机器），
+rem 代码 P/Invoke 已用 IntPtr 自适应位数。
+"%CSC%" /nologo /optimize+ /platform:anycpu /target:winexe ^
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll ^
   /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll ^
   /res:src\web\index.html,TypeBridgeRes.index.html ^

@@ -91,6 +91,20 @@ confirm() {
     fi
 }
 
+# 必须让用户本人拍板的询问：即使全程自动（AUTO=1）也弹窗，不自动跳过。
+# 用于"开机自启"这类用户偏好，不能被默认值代替。
+ask_real() {
+    if have_zenity; then
+        zenity --question --title="$APP_NAME 安装向导" --width=460 \
+            --text="$1" --ok-label="$2" --cancel-label="$3"
+    else
+        echo "$1"
+        echo "输入 y 表示「$2」，回车继续；其它任意键表示「$3」"
+        read -r REPLY
+        [ "$REPLY" = "y" ] || [ "$REPLY" = "Y" ]
+    fi
+}
+
 fail_exit() {
     if have_zenity; then
         zenity --error --title="$APP_NAME 安装向导" --width=460 --text="$1"
@@ -416,10 +430,18 @@ main() {
     # ④ 桌面图标 + 开始菜单 + 自启
     write_desktop_entry
     make_desktop_shortcut
-    install_autostart
+
+    # 开机自启必须让用户本人选一次（即使全程自动也弹窗），选否就不装
+    local autostart_note
+    if ask_real "是否开机自动启动 TypeBridge？\n\n开启后，每次开机自动在后台待命，手机扫码就能用。\n\n推荐开启。" "开机自启（推荐）" "不需要"; then
+        install_autostart
+        autostart_note="· 开机自启已开启（下次开机自动运行）"
+    else
+        autostart_note="· 开机自启未开启（以后想要可重新运行安装向导）"
+    fi
 
     # 完成并启动
-    local done="✅ 安装完成！全程自动，无需任何输入。\n\n· 程序目录：$INSTALL_DIR\n· 开始菜单已添加「TypeBridge」\n· 开机自启已开启（下次开机自动运行）\n\n卸载方法：开始菜单搜索 TypeBridge 相关内容，或运行 python3 $INSTALL_DIR/typebridge.py --uninstall-autostart 后删除 $INSTALL_DIR 文件夹。"
+    local done="✅ 安装完成！\n\n· 程序目录：$INSTALL_DIR\n· 开始菜单已添加「TypeBridge」\n$autostart_note\n\n卸载方法：开始菜单搜索 TypeBridge 相关内容，或运行 python3 $INSTALL_DIR/typebridge.py --uninstall-autostart 后删除 $INSTALL_DIR 文件夹。"
     msg "$done"
 
     launch_now
