@@ -991,7 +991,7 @@ namespace TypeBridge
                 Log.Info(State.Paused ? "注入已暂停" : "注入已恢复");
             });
             menu.MenuItems.Add(pauseItem);
-            startupItem = new MenuItem("开机自动启动", delegate
+            startupItem = new MenuItem("", delegate
             {
                 bool want = !AutoStart.IsEnabled();
                 string err = AutoStart.Set(want);
@@ -1000,10 +1000,10 @@ namespace TypeBridge
                     MessageBox.Show("设置开机启动失败: " + err, "TypeBridge");
                     return;
                 }
-                startupItem.Checked = AutoStart.IsEnabled();
+                RefreshStartupItem();
                 tray.ShowBalloonTip(1500, "TypeBridge", want ? "已开启开机自动启动" : "已关闭开机自动启动", ToolTipIcon.Info);
             });
-            startupItem.Checked = AutoStart.IsEnabled();
+            RefreshStartupItem();
             menu.MenuItems.Add(startupItem);
             menu.MenuItems.Add("查看日志", delegate { Log.OpenFile(); });
             menu.MenuItems.Add("-");
@@ -1019,6 +1019,14 @@ namespace TypeBridge
             tray.ContextMenu = menu;
             tray.Visible = true;
             tray.DoubleClick += delegate { OpenPair(); };
+        }
+
+        // 菜单项文字动态反映"点一下会做什么"，不靠勾选标记猜
+        private void RefreshStartupItem()
+        {
+            bool on = AutoStart.IsEnabled();
+            startupItem.Text = on ? "关闭开机启动" : "开启开机启动";
+            startupItem.Checked = on;
         }
 
         private void OpenPair()
