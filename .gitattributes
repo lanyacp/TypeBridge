@@ -6,6 +6,9 @@
 *.cs   text eol=crlf
 *.bat  text eol=crlf
 
+# Shell 脚本必须 LF（麒麟/Linux 上 bash 对 CRLF 敏感）
+*.sh   text eol=lf
+
 # 其余文本统一按 LF 存储
 * text=auto
 
