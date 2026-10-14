@@ -59,11 +59,10 @@ build\build_stage1.bat
 ## 目录结构
 
 ```
-src/          Windows 版源码 + 手机端页面
+src/          Windows 版源码 + 手机端页面 + 应用图标
 kylin/        麒麟版源码 + web + 一键安装脚本
 build/        编译好的 Windows 程序 + 编译脚本
-docs/         宣传文案与实施方案
-spike/        自动化测试脚本
+docs/         实施方案与麒麟系统适配评估（设计文档）
 ```
 
 ## 说明
