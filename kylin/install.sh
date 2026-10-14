@@ -431,11 +431,16 @@ main() {
     write_desktop_entry
     make_desktop_shortcut
 
-    # 开机自启必须让用户本人选一次（即使全程自动也弹窗），选否就不装
+    # 开机自启：已经开启就不再询问（用户明确选择过的事不要反复问），
+    # 只静默重生成一遍，顺带套用新版启动方式（开机后不弹窗）。
+    # 没装过才让用户本人选一次（即使全程自动也弹窗），选否就不装。
     local autostart_note
-    if ask_real "是否开机自动启动 TypeBridge？\n\n开启后，每次开机自动在后台待命，手机扫码就能用。\n\n推荐开启。" "开机自启（推荐）" "不需要"; then
+    if [ -f "$HOME/.config/autostart/typebridge.desktop" ]; then
         install_autostart
-        autostart_note="· 开机自启已开启（下次开机自动运行）"
+        autostart_note="· 开机自启已开启（保持不变，开机后不再自动弹窗，扫码时双击 TypeBridge 图标）"
+    elif ask_real "是否开机自动启动 TypeBridge？\n\n开启后，每次开机自动在后台待命，手机扫码就能用。\n开机后不会弹窗，需要扫码时双击 TypeBridge 图标即可。\n\n推荐开启。" "开机自启（推荐）" "不需要"; then
+        install_autostart
+        autostart_note="· 开机自启已开启（下次开机自动在后台运行）"
     else
         autostart_note="· 开机自启未开启（以后想要可重新运行安装向导）"
     fi

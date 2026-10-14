@@ -28,6 +28,7 @@ rem 代码 P/Invoke 已用 IntPtr 自适应位数。
   /res:src\web\pair.html,TypeBridgeRes.pair.html ^
   /res:src\web\mobile.html,TypeBridgeRes.mobile.html ^
   /res:src\web\qrcode.js,TypeBridgeRes.qrcode.js ^
+  /res:src\typebridge.ico,TypeBridgeRes.typebridge.ico ^
   /out:build\TypeBridge.exe src\TypeBridge.cs
 if errorlevel 1 (
   echo [ERROR] compile failed.

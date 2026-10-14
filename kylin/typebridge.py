@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 TypeBridge 麒麟版（Linux）
-手机扫码 → 局域网 WebSocket → 把文字送进电脑前台输入框
+手机扫码 → 局域网 WebSocket → 把文字送进电脑前台输入框，图片/文件传到电脑接收目录
+（图片可顺手粘贴到光标处）
 
 设计原则与 Windows 版一致：只做管道，不做大脑。
 不做语音识别、不做文字优化，识别全交给手机输入法，本程序只负责把字送到地方。
@@ -17,6 +18,7 @@ TypeBridge 麒麟版（Linux）
     python3 typebridge.py --open-browser   启动后自动打开配对页
     python3 typebridge.py --install-autostart    装开机自启
     python3 typebridge.py --uninstall-autostart  卸开机自启
+    python3 typebridge.py --ip 192.168.1.5      指定对外局域网 IP（多网卡/代理虚拟网卡时用，会记住）
 
 注入通道（运行时自动挑选，不用手工配）：
     X11 会话        xdotool > dotool > clipboard
@@ -42,6 +44,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 
 # ============================================================
 # 常量
@@ -54,8 +57,12 @@ LOG_FILE = os.path.join(CONF_DIR, "log.txt")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 AUTOSTART_DIR = os.path.expanduser("~/.config/autostart")
 
+VERSION = "v0.4"
+UPDATE_URL = "https://gitee.com/lanyacp/TypeBridge"
+
 MAX_TEXT = 10000          # 单次最多 1 万字符
 MAX_FRAME = 1024 * 1024   # WS 单帧上限 1MB
+MAX_FILE = 200 * 1024 * 1024   # 单文件传输上限 200MB
 BATCH_CHARS = 500         # 键入类通道每批字符数（防单次调用超时）
 KEY_BATCH = 200           # 按键类通道每批次数（防命令行参数超长）
 
@@ -68,6 +75,12 @@ WARN_HTML = (
     '按提示把工具装好，再重启本程序。'
     '</div>'
 )
+
+IMAGE_MIME = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".bmp": "image/bmp", ".webp": "image/webp",
+}
+_recv_dir_cache = None
 
 
 # ============================================================
@@ -104,6 +117,48 @@ class State(object):
     paused = False
     clients = 0
     lock = threading.Lock()
+    qr_ip = None   # 当前二维码指向的本机 IPv4，启动时选定（--ip 可指定）
+
+
+# ============================================================
+# 配置（~/.config/typebridge/config.json：配对码 + 记住的 IP 等）
+# ============================================================
+
+class Conf(object):
+    _lock = threading.Lock()
+    _data = None
+
+    @classmethod
+    def get(cls, key, default=None):
+        with cls._lock:
+            return cls._read_locked().get(key, default)
+
+    @classmethod
+    def set(cls, key, value):
+        with cls._lock:
+            cls._read_locked()[key] = value
+            cls._save_locked()
+
+    @classmethod
+    def _read_locked(cls):
+        if cls._data is None:
+            try:
+                with open(CONF_FILE, encoding="utf-8") as f:
+                    cls._data = json.load(f)
+            except Exception:
+                cls._data = {}
+            if not isinstance(cls._data, dict):
+                cls._data = {}
+        return cls._data
+
+    @classmethod
+    def _save_locked(cls):
+        try:
+            os.makedirs(CONF_DIR, exist_ok=True)
+            with open(CONF_FILE, "w", encoding="utf-8") as f:
+                json.dump(cls._data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            Log.info("保存配置失败: %s" % e)
 
 
 # ============================================================
@@ -116,41 +171,19 @@ class Pairing(object):
 
     @classmethod
     def load_or_new(cls):
-        try:
-            if os.path.exists(CONF_FILE):
-                with open(CONF_FILE, encoding="utf-8") as f:
-                    code = (json.load(f) or {}).get("pair_code", "")
-                if isinstance(code, str) and re.match(r"^[0-9]{4}$", code):
-                    with cls._lock:
-                        cls._code = code
-                    return code
-        except Exception as e:
-            Log.info("读取配置失败，将重新生成配对码: %s" % e)
+        code = Conf.get("pair_code", "")
+        if isinstance(code, str) and re.match(r"^[0-9]{4}$", code):
+            with cls._lock:
+                cls._code = code
+            return code
         return cls.new_code()
 
     @classmethod
     def new_code(cls):
         with cls._lock:
             cls._code = "%04d" % random.randint(1000, 9999)
-            cls._save()
+            Conf.set("pair_code", cls._code)
             return cls._code
-
-    @classmethod
-    def _save(cls):
-        try:
-            os.makedirs(CONF_DIR, exist_ok=True)
-            data = {}
-            if os.path.exists(CONF_FILE):
-                try:
-                    with open(CONF_FILE, encoding="utf-8") as f:
-                        data = json.load(f) or {}
-                except Exception:
-                    data = {}
-            data["pair_code"] = cls._code
-            with open(CONF_FILE, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            Log.info("保存配对码失败: %s" % e)
 
     @classmethod
     def code(cls):
@@ -397,6 +430,17 @@ class YdotoolInjector(Injector):
             raise InjectError("ydotool %s" % msg[:80])
 
 
+def is_wayland():
+    """当前会话是不是 Wayland。
+
+    XDG_SESSION_TYPE 在麒麟上从自启/后台拉起的进程里经常拿不到，
+    所以再看 WAYLAND_DISPLAY，两个都没有才认成不是。
+    """
+    if os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
+        return True
+    return bool(os.environ.get("WAYLAND_DISPLAY"))
+
+
 class ClipboardInjector(Injector):
     """剪贴板 + 模拟粘贴。中文绝对不出错，代价是覆盖剪贴板。"""
     name = "clipboard"
@@ -407,8 +451,10 @@ class ClipboardInjector(Injector):
 
     @staticmethod
     def pick_copier():
-        session = os.environ.get("XDG_SESSION_TYPE", "")
-        if session == "wayland" and shutil.which("wl-copy"):
+        # Wayland 会话里 wl-copy 必须排最前：xclip 只对 XWayland 应用可靠，
+        # 原生 Wayland 应用（新版 WPS、系统设置等）可能粘不进去。
+        # 判定不能只看 XDG_SESSION_TYPE，从自启拉起时它经常是空的（见 is_wayland）。
+        if is_wayland() and shutil.which("wl-copy"):
             return (shutil.which("wl-copy"), [])
         if shutil.which("xclip"):
             return (shutil.which("xclip"), ["-selection", "clipboard"])
@@ -434,7 +480,10 @@ class ClipboardInjector(Injector):
 
     @staticmethod
     def available():
-        if ClipboardInjector.pick_copier() is None:
+        copier = ClipboardInjector.pick_copier()
+        if copier is None:
+            if is_wayland():
+                return False, "Wayland 会话需要 wl-clipboard：sudo apt install wl-clipboard（xclip / xsel 也没有）"
             return False, "缺少剪贴板工具（wl-clipboard / xclip / xsel 都没有）"
         if ClipboardInjector.pick_presser() is None:
             return False, "缺少模拟按键工具（xdotool / dotool / ydotool 都没有）"
@@ -580,6 +629,82 @@ def channel_report():
 
 
 # ============================================================
+# 文件接收与图片粘贴
+# ============================================================
+
+def recv_dir():
+    """接收目录。优先问 xdg-user-dir（麒麟中文桌面实际是 ~/下载），
+    拿不到退回 ~/Downloads。"""
+    global _recv_dir_cache
+    if _recv_dir_cache:
+        return _recv_dir_cache
+    d = None
+    rc, out, _ = _run(["xdg-user-dir", "DOWNLOAD"], timeout=3)
+    if rc == 0:
+        cand = out.decode("utf-8", "replace").strip()
+        if cand and os.path.isabs(cand):
+            d = cand
+    if not d:
+        d = os.path.join(os.path.expanduser("~"), "Downloads")
+    _recv_dir_cache = os.path.join(d, "TypeBridge接收")
+    return _recv_dir_cache
+
+
+def prepare_path(raw_name):
+    """接收目录内的不重名路径；文件名消毒，防路径穿越。"""
+    os.makedirs(recv_dir(), exist_ok=True)
+    name = os.path.basename(raw_name or "").strip()
+    name = re.sub(r'[\\/:*?"<>|\x00]', "_", name)
+    if not name:
+        name = "未命名"
+    if len(name) > 100:
+        ext = os.path.splitext(name)[1]
+        name = name[:100 - len(ext)] + ext
+    path = os.path.join(recv_dir(), name)
+    n = 1
+    while os.path.exists(path):
+        base, ext = os.path.splitext(name)
+        path = os.path.join(recv_dir(), "%s(%d)%s" % (base, n, ext))
+        n += 1
+    return path
+
+
+def paste_image(path):
+    """尽力而为：图片以 image/* 目标放上剪贴板，再模拟 Ctrl+V。
+
+    达不到 Windows 版（原生 CF_HDROP）的可靠度：需要 xclip(X11) 或
+    wl-copy(Wayland)，且目标应用接受 image/* 剪贴板目标。失败只返回原因，
+    文件已经落盘，用户仍可手工取用。
+    """
+    presser = ClipboardInjector.pick_presser()
+    if presser is None:
+        return False, "缺少模拟按键工具（xdotool / dotool / ydotool 都没有）"
+    mime = IMAGE_MIME.get(os.path.splitext(path)[1].lower())
+    if not mime:
+        return False, "不是图片，跳过粘贴"
+    wl = shutil.which("wl-copy")
+    xc = shutil.which("xclip")
+    try:
+        if (is_wayland() and wl) or (not xc and wl):
+            # wl-copy 常驻持有剪贴板，喂完文件即可去粘贴
+            with open(path, "rb") as f:
+                subprocess.Popen([wl, "--type", mime], stdin=f,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif xc:
+            # xclip -i 文件：自己 fork 常驻持有剪贴板
+            subprocess.Popen([xc, "-selection", "clipboard", "-t", mime, "-i", path],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            return False, "缺少 xclip / wl-copy，无法携带图片上剪贴板"
+        time.sleep(0.4)   # 等剪贴板所有权转移
+        presser.paste()
+        time.sleep(0.7)   # 等目标应用把剪贴板读走
+        return True, ""
+    except Exception as e:
+        return False, str(e)[:60]
+
+
+# ============================================================
 # 帧缓冲读取器（HTTP 头与 WS 帧共用，避免预读吃掉升级后的数据）
 # ============================================================
 
@@ -617,6 +742,17 @@ class WsSession(object):
         self.authed = False
         self.closed = False
         self.send_lock = threading.Lock()
+        # 文件接收状态（单会话单任务，手机串行发送）
+        self.receiving = False
+        self.recv_f = None
+        self.recv_path = None
+        self.recv_size = 0
+        self.recv_got = 0
+        self.last_ack = 0
+        self.recv_paste = False
+        # 撤回护栏：本会话注入过的字符数。Linux 侧没有低成本的前台窗口监听，
+        # 这里不做换窗归零，只能防住「撤回次数超过自己注入量」的越界删除
+        self.injected = 0
 
     # ---- 会话互斥：新连接顶掉旧连接 ----
     @classmethod
@@ -626,6 +762,11 @@ class WsSession(object):
             cls._current = sess
         if old is not None and old is not sess:
             Log.info("新连接接入，断开旧连接")
+            try:
+                # 先告知旧页面原因，让它停止盲重连，再断开
+                old.send_error("此页面已被新连接取代")
+            except Exception:
+                pass
             old.kick()
 
     @classmethod
@@ -633,6 +774,20 @@ class WsSession(object):
         with cls._lock:
             if cls._current is sess:
                 cls._current = None
+
+    # 电脑端主动断开当前手机：带原因踢下线，返回是否真有会话被踢
+    @classmethod
+    def kick_current(cls, msg):
+        with cls._lock:
+            cur = cls._current
+        if cur is None:
+            return False
+        try:
+            cur.send_error(msg)
+        except Exception:
+            pass
+        cur.kick()
+        return True
 
     # ---- 握手 ----
     def handshake(self, key):
@@ -688,6 +843,7 @@ class WsSession(object):
     def read_frame(self):
         b0 = self.reader.read_byte()
         b1 = self.reader.read_byte()
+        fin = (b0 & 0x80) != 0
         opcode = b0 & 0x0F
         masked = (b1 & 0x80) != 0
         length = b1 & 0x7F
@@ -701,34 +857,65 @@ class WsSession(object):
         data = self.reader.read_exact(length) if length else b""
         if mask:
             data = bytes(c ^ mask[i & 3] for i, c in enumerate(data))
-        return opcode, data
+        return fin, opcode, data
 
     # ---- 主循环 ----
     def run(self):
-        WsSession.set_current(self)
+        # 注意：不在这里顶替旧会话！必须等配对验证通过后才替换（见 handle 的 hello 分支），
+        # 否则任何拿错码的连接都会把正在干活的手机顶下线。
+        # 分片重组：部分浏览器内核（如微信 XWeb）会把大帧拆成 FIN=0 + 续帧(0x0)发送
+        frag = None
+        frag_op = 0
         try:
             while not self.closed:
                 try:
-                    opcode, payload = self.read_frame()
+                    fin, opcode, payload = self.read_frame()
                 except Exception:
                     break
-                if opcode == 0x8:      # close
+
+                op = opcode
+                full = payload
+                if opcode == 0x0:                 # 续帧
+                    if frag is None:
+                        continue                  # 无起点的续帧，丢弃
+                    frag.extend(payload)
+                    if len(frag) > MAX_FRAME:
+                        break                     # 分片总量兜底防滥用
+                    if not fin:
+                        continue
+                    op = frag_op
+                    full = bytes(frag)
+                    frag = None
+                elif not fin:                     # 首分片（只有数据帧可以分片）
+                    if opcode not in (0x1, 0x2):
+                        continue
+                    frag = bytearray(payload)
+                    frag_op = opcode
+                    continue
+
+                if op == 0x8:      # close
                     break
-                if opcode == 0x9:      # ping -> pong
-                    self.send_frame(0xA, payload)
+                if op == 0x9:      # ping -> pong
+                    self.send_frame(0xA, full)
                     continue
-                if opcode == 0xA:      # pong
+                if op == 0xA:      # pong
                     continue
-                if opcode not in (0x1, 0x2):
+                if op == 0x2:      # 二进制：文件数据块
+                    if not self.handle_binary(full):
+                        break
+                    continue
+                if op != 0x1:
                     continue
                 try:
-                    msg = json.loads(payload.decode("utf-8"))
+                    msg = json.loads(full.decode("utf-8"))
                 except Exception:
                     break
                 if not self.handle(msg):
                     break
         finally:
             self.closed = True
+            if self.receiving:
+                self.abort_receive()   # 传一半断线，删掉残文件
             if self.authed:
                 with State.lock:
                     State.clients = max(0, State.clients - 1)
@@ -755,6 +942,14 @@ class WsSession(object):
                 Log.info("配对失败，收到[%s] 期望[%s]" % (code, Pairing.code()))
                 return False
             self.authed = True
+            # 配对通过后才成为活动会话，顶掉旧连接（旧页面会收到"被取代"通知）
+            WsSession.set_current(self)
+            # 先等旧会话把计数减完再登记自己，避免交接瞬间计数短暂归零
+            for _ in range(20):
+                with State.lock:
+                    if State.clients == 0:
+                        break
+                time.sleep(0.05)
             with State.lock:
                 State.clients += 1
             self.send_json({"type": "ready"})
@@ -773,12 +968,14 @@ class WsSession(object):
                 return True
             if self._inject(lambda: self.injector.type_text(text)):
                 Log.info("注入 %d 字符" % len(text))
+                self.injected += len(text)
                 self.send_ack(len(text))
             return True
 
         if mtype == "sync":
             # 实时同步：一次完成「退格 N 次 + 注入增量」
             if State.paused:
+                self.send_error("注入已暂停")
                 return True
             text = msg.get("text") or ""
             try:
@@ -801,27 +998,78 @@ class WsSession(object):
 
             if self._inject(_do_sync):
                 Log.info("同步 退格%d 注入%d字符" % (back, len(text)))
+                self.injected = max(0, self.injected - back) + len(text)
                 self.send_ack(len(text))
             return True
 
         if mtype == "enter":
             if State.paused:
-                self.send_ack(0)
+                self.send_error("注入已暂停")
                 return True
             if self._inject(lambda: self.injector.press("Enter")):
+                self.injected += 1   # 手机端把换行也算进镜像，这里同步记账
                 self.send_ack(0)
             return True
 
         if mtype == "backspace":
-            if not State.paused:
-                try:
-                    count = int(msg.get("count") or 1)
-                except Exception:
-                    count = 1
-                count = max(1, min(count, MAX_TEXT))
-                if self._inject(lambda: self.injector.press("BackSpace", count)):
-                    self.send_ack(count)
+            if State.paused:
+                self.send_error("注入已暂停")
+                return True
+            try:
+                count = int(msg.get("count") or 1)
+            except Exception:
+                count = 1
+            count = max(1, min(count, MAX_TEXT))
+            # 单个退格是普通编辑动作，放行；批量退格（撤回）只能删本会话注入过的内容
+            if count > 1:
+                if self.injected <= 0:
+                    self.send_error("当前窗口没有可撤回的内容（若刚切换过窗口，撤回已失效）")
+                    return True
+                if count > self.injected:
+                    self.send_error("本会话只注入过 %d 个字符，撤回已截断" % self.injected)
+                    count = self.injected
+            if self._inject(lambda: self.injector.press("BackSpace", count)):
+                self.injected = max(0, self.injected - count)
                 self.send_ack(count)
+            return True
+
+        if mtype == "file":
+            if self.receiving:
+                self.send_error("正在接收另一个文件，请稍候")
+                return True
+            try:
+                size = int(msg.get("size") or 0)
+            except Exception:
+                size = 0
+            if size <= 0 or size > MAX_FILE:
+                self.send_error("文件大小无效（限200MB内）")
+                return True
+            try:
+                self.recv_path = prepare_path(msg.get("name") or "")
+                self.recv_f = open(self.recv_path, "wb")
+            except Exception as e:
+                self.send_error("创建文件失败: %s" % e)
+                return True
+            self.receiving = True
+            self.recv_size = size
+            self.recv_got = 0
+            self.last_ack = 0
+            self.recv_paste = bool(msg.get("paste"))
+            Log.info("开始接收文件 %s (%d 字节)" % (os.path.basename(self.recv_path), size))
+            self.send_json({"type": "file_begin"})
+            return True
+
+        if mtype == "file_end":
+            if self.receiving:
+                self.finish_receive()
+            return True
+
+        if mtype == "file_cancel":
+            # 手机端取消发送：丢弃半截文件并回执，手机据此把队列状态清干净
+            if self.receiving:
+                cn = os.path.basename(self.recv_path or "")
+                self.abort_receive()
+                self.send_json({"type": "note", "msg": "已取消接收 %s" % cn})
             return True
 
         if mtype == "ping":
@@ -860,6 +1108,77 @@ class WsSession(object):
             "fg": foreground_title(),
         })
 
+    # ---- 文件接收 ----
+    def handle_binary(self, data):
+        """二进制帧 = 文件数据块。返回 False 表示应断开。"""
+        if not self.receiving or self.recv_f is None:
+            return True   # 未声明文件的二进制帧，忽略
+        if self.recv_got + len(data) > self.recv_size:
+            self.abort_receive()
+            try:
+                self.send_error("文件超出声明大小，已中止")
+            except Exception:
+                pass
+            return False
+        try:
+            self.recv_f.write(data)
+            self.recv_got += len(data)
+            if self.recv_got - self.last_ack >= 1024 * 1024 or self.recv_got == self.recv_size:
+                self.last_ack = self.recv_got
+                self.send_json({"type": "file_got", "bytes": self.recv_got})
+        except Exception:
+            self.abort_receive()
+            return False
+        return True
+
+    def abort_receive(self):
+        self.receiving = False
+        try:
+            if self.recv_f:
+                self.recv_f.close()
+        except Exception:
+            pass
+        self.recv_f = None
+        try:
+            if self.recv_path and os.path.exists(self.recv_path):
+                os.remove(self.recv_path)
+        except Exception:
+            pass
+
+    def finish_receive(self):
+        self.receiving = False
+        try:
+            self.recv_f.close()
+        except Exception:
+            pass
+        self.recv_f = None
+        if self.recv_got != self.recv_size or not os.path.isfile(self.recv_path):
+            try:
+                if os.path.isfile(self.recv_path):
+                    os.remove(self.recv_path)
+            except Exception:
+                pass
+            self.send_error("传输不完整（%d/%d），请重试" % (self.recv_got, self.recv_size))
+            return
+        name = os.path.basename(self.recv_path)
+        want_paste = self.recv_paste and (os.path.splitext(name)[1].lower() in IMAGE_MIME) \
+            and not State.paused
+        pasted = False
+        why = ""
+        if State.paused and self.recv_paste and (os.path.splitext(name)[1].lower() in IMAGE_MIME):
+            why = "注入已暂停，未粘贴"
+        if want_paste:
+            # 同步执行（约 1.1s）：Linux 剪贴板是"工具常驻持有"模型，顺序走完最可靠；
+            # 失败也只影响"顺手粘贴"这一层，文件本身已经落盘
+            pasted, why = paste_image(self.recv_path)
+            if not pasted:
+                Log.info("图片粘贴失败（文件已保存）: %s" % why)
+        Log.info("接收完成 %s (%d 字节)%s" % (name, self.recv_got, " → 已粘贴到前台" if pasted else ""))
+        done = {"type": "file_done", "saved": name, "pasted": pasted}
+        if why:
+            done["why"] = why   # 同步粘贴，结果当场准确，手机按此显示"已保存（未粘贴原因）"
+        self.send_json(done)
+
 
 # ============================================================
 # 前台窗口标题（Linux 下用 xdotool 或 xprop 取）
@@ -889,7 +1208,7 @@ def foreground_title():
 # 网卡 IP 探测
 # ============================================================
 
-def pick_ip():
+def _primary_ip():
     """用 UDP connect 让内核选出口网卡，不真的发包。"""
     for probe in ("8.8.8.8", "223.5.5.5"):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -903,14 +1222,52 @@ def pick_ip():
             pass
         finally:
             s.close()
-    # 退路：从 ip 命令解析
-    rc, out, _ = _run(["ip", "-4", "addr", "show", "scope", "global"], timeout=3)
-    if rc == 0:
-        for m in re.finditer(r"inet\s+([0-9.]+)/", out.decode("utf-8", "replace")):
-            ip = m.group(1)
-            if not ip.startswith("127."):
-                return ip
     return None
+
+
+def list_ips():
+    """列出本机所有可用的局域网 IPv4：[(ip, 网卡名)]。
+
+    只挑一个不够用：机器上有代理的朋友常装着 TUN/虚拟网卡，默认路由
+    被它抢走，UDP 探测会选中它，手机却连不上。把地址全列出来，程序
+    自动挑一个，剩下的交给用户自己选（--ip 或配对页上的备选列表）。
+    """
+    found = []
+    rc, out, _ = _run(["ip", "-4", "-o", "addr", "show", "scope", "global"], timeout=3)
+    if rc == 0:
+        for line in out.decode("utf-8", "replace").splitlines():
+            m = re.search(r"^\d+:\s+(\S+)\s+inet\s+([0-9.]+)/", line)
+            if m and not m.group(2).startswith("127."):
+                found.append((m.group(2), m.group(1)))
+    primary = _primary_ip()
+    # 出口地址排最前（多半是用户真正在用的那块网卡）
+    if primary:
+        found.sort(key=lambda t: 0 if t[0] == primary else 1)
+    seen = set()
+    ips = []
+    for ip, name in found:
+        if ip in seen:
+            continue
+        seen.add(ip)
+        ips.append((ip, name))
+    return ips
+
+
+def pick_ip(preferred=None):
+    """挑一个对外服务的局域网 IP。
+
+    preferred 是配置里记住的地址（用户的明确选择，最优先）；
+    它失效了就退回自动探测：UDP 出口探测 > ip 命令里的第一个全局地址。
+    """
+    ips = list_ips()
+    if preferred:
+        for ip, _name in ips:
+            if ip == preferred:
+                return ip
+    if ips:
+        return ips[0][0]
+    # 兜底：没有 ip 命令或没有全局地址时，单独试一次 UDP 探测
+    return _primary_ip()
 
 
 def open_browser(url):
@@ -946,9 +1303,11 @@ def port_in_use(port):
 # ============================================================
 
 class Server(object):
-    def __init__(self, port, injector):
+    def __init__(self, port, injector, ip=None, ips=None):
         self.port = port
         self.injector = injector
+        self.ip = ip or "127.0.0.1"
+        self.ips = ips or []
         self.ready = False
         self.failed = False
 
@@ -1027,18 +1386,84 @@ class Server(object):
             if "?" in path:
                 path, qs = path.split("?", 1)
 
-            if path == "/":
-                self.write(sock, 200, "text/html; charset=utf-8", self.asset("index.html"))
-            elif path == "/pair":
-                ip = pick_ip() or "127.0.0.1"
-                url = "http://%s:%d/m?code=%s" % (ip, self.port, Pairing.code())
-                html = self.asset("pair.html").replace("{{URL}}", url).replace("{{CODE}}", Pairing.code())
-                html = html.replace("<!--WARN-->", WARN_HTML if self.injector is None else "")
-                self.write(sock, 200, "text/html; charset=utf-8", html)
+            # 扫码页/二维码资源只允许电脑本机访问：局域网里其他设备不应能看到配对信息
+            try:
+                peer = sock.getpeername()[0]
+            except Exception:
+                peer = ""
+            local = peer in ("127.0.0.1", "::1") or peer.startswith("127.")
+
+            if path in ("/", "/pair", "/qrcode.js"):
+                if not local:
+                    self.write(sock, 403, "text/plain; charset=utf-8",
+                               "此页面仅允许在电脑本机打开；手机请使用二维码里的链接")
+                elif path == "/":
+                    self.write(sock, 200, "text/html; charset=utf-8", self.asset("index.html"))
+                elif path == "/qrcode.js":
+                    self.write(sock, 200, "application/javascript; charset=utf-8", self.asset("qrcode.js"))
+                else:
+                    # 二维码指向启动时选定的地址，不在每次请求时现选：
+                    # 多网卡机器上反复刷新页面不应换地址
+                    ip = State.qr_ip or self.ip
+                    url = "http://%s:%d/m?code=%s" % (ip, self.port, Pairing.code())
+                    html = self.asset("pair.html").replace("{{URL}}", url).replace("{{CODE}}", Pairing.code())
+                    html = html.replace("{{IP}}", ip).replace("{{PORT}}", str(self.port))
+                    html = html.replace("<!--WARN-->", WARN_HTML if self.injector is None else "")
+                    html = html.replace("<!--IPS-->", self._ips_html())
+                    html = html.replace("{{VER}}", VERSION)
+                    self.write(sock, 200, "text/html; charset=utf-8", html)
             elif path == "/m":
                 self.write(sock, 200, "text/html; charset=utf-8", self.asset("mobile.html"))
-            elif path == "/qrcode.js":
-                self.write(sock, 200, "application/javascript; charset=utf-8", self.asset("qrcode.js"))
+            elif path == "/status":
+                # 供扫码页轮询：只回答「有没有连接」和「页面上的码是否仍是当前码」，
+                # 不回传配对码本身（页面把自己看到的码带在查询串里比对）
+                page_code = ""
+                for kv in qs.split("&"):
+                    if kv.startswith("c="):
+                        page_code = urllib.parse.unquote(kv[2:])
+                        break
+                self.write(sock, 200, "application/json; charset=utf-8",
+                           json.dumps({"connected": State.clients > 0,
+                                       "match": page_code == Pairing.code()}))
+            elif path == "/ctrl":
+                # 扫码页上的控制按钮（断开手机/重新配对/打开接收文件夹）：仅本机可用，
+                # 且请求必须带页面当时看到的配对码授权
+                if not local:
+                    self.write(sock, 403, "text/plain; charset=utf-8", "此接口仅允许在电脑本机调用")
+                else:
+                    act, page_code2 = "", ""
+                    for kv in qs.split("&"):
+                        if kv.startswith("c="):
+                            page_code2 = urllib.parse.unquote(kv[2:])
+                        elif kv.startswith("act="):
+                            act = kv[4:]
+                    if page_code2 != Pairing.code():
+                        self.write(sock, 403, "text/plain; charset=utf-8", "配对码校验失败，请刷新页面重试")
+                    elif act == "disconnect":
+                        kicked = WsSession.kick_current("电脑已断开此连接，如需重连请在手机上输入配对码")
+                        Log.info("电脑端主动断开当前手机")
+                        self.write(sock, 200, "application/json; charset=utf-8",
+                                   json.dumps({"ok": True, "kicked": kicked}))
+                    elif act == "recode":
+                        # 重新配对：换新码 + 撤销旧会话，旧设备不重新拿码就进不来
+                        nc = Pairing.new_code()
+                        WsSession.kick_current("电脑已重新配对：配对码已更新，请重新扫新码")
+                        Log.info("扫码页重新生成配对码: %s" % nc)
+                        self.write(sock, 200, "application/json; charset=utf-8", json.dumps({"ok": True}))
+                    elif act == "opendir":
+                        # 打开接收文件夹：手机传完图片后在电脑上直接取用
+                        d = recv_dir()
+                        opener = shutil.which("xdg-open")
+                        if opener:
+                            try:
+                                subprocess.Popen([opener, d], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                self.write(sock, 200, "application/json; charset=utf-8", json.dumps({"ok": True}))
+                            except Exception as e:
+                                self.write(sock, 500, "text/plain; charset=utf-8", "打开文件夹失败: %s" % e)
+                        else:
+                            self.write(sock, 500, "text/plain; charset=utf-8", "系统缺少 xdg-open，请手动打开 %s" % d)
+                    else:
+                        self.write(sock, 400, "text/plain; charset=utf-8", "unknown action")
             else:
                 self.write(sock, 404, "text/plain; charset=utf-8", "not found")
             sock.close()
@@ -1056,10 +1481,28 @@ class Server(object):
         except Exception as e:
             return "<h1>资源缺失 %s: %s</h1>" % (name, e)
 
+    def _ips_html(self):
+        """多网卡时在配对页列出全部备选地址。
+
+        有代理虚拟网卡的用户扫码连不上时，不用回来翻日志，
+        页面上直接换一个地址试。
+        """
+        if len(self.ips) <= 1:
+            return ""
+        rows = []
+        for ip, name in self.ips:
+            u = "http://%s:%d/m?code=%s" % (ip, self.port, Pairing.code())
+            cur = " ←当前" if ip == self.ip else ""
+            rows.append("<code>%s</code> %s%s<br>" % (u, name, cur))
+        return ('<div class="ips"><div class="ipstip">'
+                '本机有多个网络地址，上面这个连不上就换一个，手机浏览器直接打开：'
+                '</div>%s</div>' % "".join(rows))
+
     @staticmethod
     def write(sock, code, ctype, body):
         data = body.encode("utf-8")
-        reason = {200: "OK", 404: "Not Found", 405: "Method Not Allowed"}.get(code, "OK")
+        reason = {200: "OK", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
+                  405: "Method Not Allowed", 500: "Internal Server Error"}.get(code, "OK")
         head = (
             "HTTP/1.1 %d %s\r\n"
             "Content-Type: %s\r\n"
@@ -1078,14 +1521,15 @@ def install_autostart(port):
     os.makedirs(AUTOSTART_DIR, exist_ok=True)
     path = os.path.join(AUTOSTART_DIR, "typebridge.desktop")
     script = os.path.abspath(__file__)
-    # 带上 --open-browser：开机后服务在后台跑，用户看不到二维码，
-    # 顺手把配对页弹出来，开机就能扫码。
+    # 不带 --open-browser：开机后静默在后台待命，不再每次开机弹窗扫码。
+    # 用户要扫码时双击桌面/开始菜单的 TypeBridge 图标即可——服务已在跑、
+    # 端口被占着时，程序会自动把正在运行实例的配对页打开（见 main 单实例逻辑）。
     content = (
         "[Desktop Entry]\n"
         "Type=Application\n"
         "Name=TypeBridge\n"
         "Comment=手机扫码跨屏输入\n"
-        "Exec=%s %s --port %d --open-browser\n"
+        "Exec=%s %s --port %d\n"
         "Terminal=false\n"
         "StartupNotify=false\n"
         "X-GNOME-Autostart-enabled=true\n" % (sys.executable, script, port)
@@ -1093,7 +1537,7 @@ def install_autostart(port):
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     Log.info("已写入开机自启: %s" % path)
-    Log.info("下次登录桌面时自动启动，并会弹出配对页。")
+    Log.info("下次登录桌面时自动在后台运行（不弹窗）。需要扫码时双击桌面 TypeBridge 图标。")
     Log.info("想取消就运行：python3 %s --uninstall-autostart" % script)
 
 
@@ -1112,7 +1556,7 @@ def uninstall_autostart():
 
 def selfcheck():
     print("=" * 54)
-    print(" TypeBridge 麒麟版 自检（不做任何注入）")
+    print(" TypeBridge %s 麒麟版 自检（不做任何注入）" % VERSION)
     print("=" * 54)
     session, env_lines, rows = channel_report()
     for l in env_lines:
@@ -1152,6 +1596,9 @@ def selfcheck():
     print("  说明：%s" % channel_note(injector.name))
     if injector.name == "clipboard":
         print("  注意：剪贴板通道会覆盖你当前的剪贴板内容。")
+        if is_wayland() and not shutil.which("wl-copy"):
+            print("  提醒：这是 Wayland 会话，建议安装 wl-clipboard（sudo apt install wl-clipboard）。")
+            print("        xclip 只对 XWayland 应用可靠，原生 Wayland 应用可能粘不进去。")
     print()
     print("  下一步可跑  python3 typebridge.py --test-inject  做一次真实注入实测")
     return 0
@@ -1202,6 +1649,8 @@ def test_inject(seconds=5, text=None):
 def main():
     ap = argparse.ArgumentParser(description="TypeBridge 麒麟版（Linux）")
     ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--ip", default=None,
+                    help="指定对外局域网 IP（多网卡/有代理虚拟网卡时用，会记住）")
     ap.add_argument("--channel", default=None,
                     help="强制指定注入通道: xdotool / dotool / clipboard / ydotool")
     ap.add_argument("--selfcheck", action="store_true", help="环境与通道自检，不做注入")
@@ -1241,13 +1690,31 @@ def main():
         return 0
 
     code = Pairing.load_or_new()
-    ip = pick_ip()
+
+    # 网络：机器上有多个网络（代理虚拟网卡、多网卡）时，用户可用 --ip 指定，
+    # 程序记进配置，之后每次启动都用它；配置里的地址失效了才退回自动探测。
+    ips = list_ips()
+    if args.ip:
+        Conf.set("ip", args.ip)
+        ip = args.ip
+        if ips and ip not in [c[0] for c in ips]:
+            Log.info("注意: %s 不在本机网卡地址里（可选: %s），二维码仍指向它，手机可能访问不到"
+                     % (ip, "、".join("%s(%s)" % c for c in ips)))
+    else:
+        preferred = Conf.get("ip", "")
+        ip = pick_ip(preferred)
+        if preferred and ip != preferred:
+            Log.info("配置的网络地址 %s 已不存在，自动改用 %s（可用 --ip 重新指定）" % (preferred, ip))
     if not ip:
         Log.info("未找到可用的局域网 IP，请检查网络连接")
         return 1
+    State.qr_ip = ip
 
-    Log.info("========== TypeBridge 麒麟版 启动 ==========")
-    Log.info("本机局域网 IP: %s" % ip)
+    Log.info("========== TypeBridge %s 启动 ==========" % VERSION)
+    if len(ips) > 1:
+        Log.info("检测到多个局域网地址: " + "、".join("%s(%s)" % c for c in ips))
+    Log.info("扫码地址(当前网卡): http://%s:%d  手机连不上时重启加 --ip 换一个地址" % (ip, args.port))
+    Log.info("监听端口: %d" % args.port)
     Log.info("配对码: %s" % code)
     if injector is None:
         Log.info("注入通道: 无（未就绪）")
@@ -1257,7 +1724,7 @@ def main():
             Log.info("提醒：剪贴板通道会覆盖剪贴板内容，且终端里要用 Ctrl+Shift+V 才粘贴")
     Log.info("手机访问地址: http://%s:%d/m?code=%s" % (ip, args.port, code))
 
-    srv = Server(args.port, injector)
+    srv = Server(args.port, injector, ip, ips)
     t = threading.Thread(target=srv.serve_forever)
     t.daemon = True
     t.start()
