@@ -57,7 +57,7 @@ LOG_FILE = os.path.join(CONF_DIR, "log.txt")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 AUTOSTART_DIR = os.path.expanduser("~/.config/autostart")
 
-VERSION = "v0.4"
+VERSION = "v0.5"
 UPDATE_URL = "https://gitee.com/lanyacp/TypeBridge"
 
 MAX_TEXT = 10000          # 单次最多 1 万字符
@@ -1413,10 +1413,12 @@ class Server(object):
                     html = html.replace("{{VER}}", VERSION)
                     self.write(sock, 200, "text/html; charset=utf-8", html)
             elif path == "/m":
+                self.note_peer_visit(addr)
                 self.write(sock, 200, "text/html; charset=utf-8", self.asset("mobile.html"))
             elif path == "/status":
                 # 供扫码页轮询：只回答「有没有连接」和「页面上的码是否仍是当前码」，
-                # 不回传配对码本身（页面把自己看到的码带在查询串里比对）
+                # 不回传配对码本身（页面把自己看到的码带在查询串里比对）。
+                # ip 一起带回：电脑换了网络后扫码页据此自动刷新成新地址的二维码
                 page_code = ""
                 for kv in qs.split("&"):
                     if kv.startswith("c="):
@@ -1424,7 +1426,8 @@ class Server(object):
                         break
                 self.write(sock, 200, "application/json; charset=utf-8",
                            json.dumps({"connected": State.clients > 0,
-                                       "match": page_code == Pairing.code()}))
+                                       "match": page_code == Pairing.code(),
+                                       "ip": State.qr_ip or ""}))
             elif path == "/ctrl":
                 # 扫码页上的控制按钮（断开手机/重新配对/打开接收文件夹）：仅本机可用，
                 # 且请求必须带页面当时看到的配对码授权
@@ -1480,6 +1483,25 @@ class Server(object):
                 return f.read()
         except Exception as e:
             return "<h1>资源缺失 %s: %s</h1>" % (name, e)
+
+    # 手机端页面被访问的记录（每个来源 IP 只记一次）：
+    # 「扫码后打不开」远程排查时，这一行能直接判断手机到底有没有到达电脑
+    _seen_peers = set()
+    _peer_lock = threading.Lock()
+
+    @classmethod
+    def note_peer_visit(cls, addr):
+        try:
+            peer = str(addr[0]) if isinstance(addr, tuple) and addr else ""
+            if not peer:
+                return
+            with cls._peer_lock:
+                if peer in cls._seen_peers:
+                    return
+                cls._seen_peers.add(peer)
+            Log.info("手机端页面被访问: 来自 %s（扫码已到达电脑）" % peer)
+        except Exception:
+            pass
 
     def _ips_html(self):
         """多网卡时在配对页列出全部备选地址。
@@ -1741,9 +1763,29 @@ def main():
 
     Log.info("服务运行中。按 Ctrl+C 退出。")
     Log.info("电脑上打开 %s 即可扫码" % url)
+
+    # 网络守望：换 WiFi / 网线插拔后旧地址失效是「扫码打不开」的高发原因。
+    # 每 15 秒核对一次；地址失效就自动切到可用地址并记日志（扫码页每 2 秒轮询
+    # /status，发现 ip 变了会自动刷新成新地址的二维码）。--ip 明确指定的不自动改。
+    ip_fixed = bool(args.ip)
+    last_net_check = 0.0
     try:
         while True:
             time.sleep(1)
+            if ip_fixed:
+                continue
+            if time.time() - last_net_check < 15:
+                continue
+            last_net_check = time.time()
+            try:
+                cur_ips = [c[0] for c in list_ips()]
+                if State.qr_ip and cur_ips and State.qr_ip not in cur_ips:
+                    new_ip = pick_ip(Conf.get("ip", ""))
+                    if new_ip and new_ip != State.qr_ip:
+                        State.qr_ip = new_ip
+                        Log.info("网络已变化，扫码地址自动切换为: %s:%d" % (new_ip, args.port))
+            except Exception:
+                pass
     except KeyboardInterrupt:
         Log.info("收到中断，退出")
 

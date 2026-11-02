@@ -754,7 +754,7 @@ namespace TypeBridge
     // ---------------- 版本与更新地址 ----------------
     internal static class AppInfo
     {
-        internal const string Version = "v0.4";
+        internal const string Version = "v0.5";
         internal const string UpdateUrl = "https://gitee.com/lanyacp/TypeBridge";
         internal const string UpdateUrlText = "gitee.com/lanyacp/TypeBridge";
     }
@@ -814,6 +814,76 @@ namespace TypeBridge
                 }
             }
             catch (Exception ex) { Log.Info("保存网络选择失败: " + ex.Message); }
+        }
+    }
+
+    // ---------------- 防火墙自检/自救 ----------------
+    // 「手机扫码后打不开」的头号原因：首次运行时 Windows 弹的防火墙询问被点了取消，
+    // 入站被拦——服务在跑，但手机的请求根本到不了电脑。这里做两件事：
+    //   1) 启动时只读检查有没有针对本 exe 的生效入站放行规则（读 HKLM 注册表，免管理员）
+    //   2) 托盘「一键修复」用提权 netsh 补一条覆盖全部网络类型(公用/专用/域)的放行规则
+    internal static class FirewallGuard
+    {
+        private const string RuleName = "TypeBridgeAllow";
+        private const string RulesKey =
+            @"SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules";
+
+        // 有没有生效的入站放行规则盖住本程序。读注册表失败时宁可返回 true（不误报打扰）。
+        internal static bool CheckAllowed()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(RulesKey, false))
+                {
+                    if (k == null) return true;
+                    string exe = Application.ExecutablePath.ToLowerInvariant();
+                    foreach (string name in k.GetValueNames())
+                    {
+                        string v = k.GetValue(name) as string;
+                        if (v == null) continue;
+                        string lv = v.ToLowerInvariant();
+                        // 规则格式：v2.30|Action=Allow|Active=TRUE|Dir=In|App=C:\path\typebridge.exe|...
+                        if (lv.IndexOf("|app=" + exe) < 0) continue;
+                        if (lv.IndexOf("action=allow") < 0) continue;
+                        if (lv.IndexOf("active=true") < 0) continue;
+                        if (lv.IndexOf("dir=in") < 0) continue;
+                        return true;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Info("防火墙规则检查失败(按已放行处理): " + ex.Message);
+                return true;
+            }
+            return false;
+        }
+
+        // 提权补放行规则（UAC 点「是」后约 1 秒完成）。返回修复后是否检测到规则。
+        // 用户在 UAC 框点了取消会抛异常，按未修复返回。
+        internal static bool Fix()
+        {
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.FileName = "cmd.exe";
+                // 先删旧的同名规则再加新的，重复点修复也不会堆规则
+                psi.Arguments = "/c netsh advfirewall firewall delete rule name=" + RuleName +
+                    " >nul 2>&1 & netsh advfirewall firewall add rule name=" + RuleName +
+                    " dir=in action=allow program=\"" + Application.ExecutablePath +
+                    "\" profile=any enable=yes";
+                psi.Verb = "runas";           // 弹 UAC 管理员确认框
+                psi.UseShellExecute = true;
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                Process p = Process.Start(psi);
+                if (p != null) p.WaitForExit(30000);
+            }
+            catch (Exception ex)
+            {
+                Log.Info("防火墙放行未完成: " + ex.Message);   // 常见：UAC 被取消
+                return false;
+            }
+            return CheckAllowed();
         }
     }
 
@@ -979,6 +1049,42 @@ namespace TypeBridge
                 if (c.Ip == ip) { current = c; return true; }
             }
             return false;
+        }
+
+        // 网络守望用：当前地址已经不在任何网卡上（换了 WiFi / 网线拔了）时，
+        // 自动切到可用地址。返回新地址；当前地址仍有效返回 null。
+        // 笔记本换网是「二维码扫不开」的高发原因——二维码里印的还是旧网段的 IP。
+        private static readonly object RepairGate = new object();
+        internal static string AutoRepairCurrent()
+        {
+            lock (RepairGate)
+            {
+                List<Candidate> list = ListCandidates();
+                if (list.Count == 0) return null;
+                string cur = current == null ? null : current.Ip;
+                foreach (Candidate c in list)
+                {
+                    if (c.Ip == cur) return null;   // 还在，不用动
+                }
+                // 先看用户记住的选择是否随网络回来了（比如切回常用的那个 WiFi）
+                string preferred = Config.PreferredIp();
+                if (!string.IsNullOrEmpty(preferred))
+                {
+                    foreach (Candidate c in list)
+                    {
+                        if (c.Ip == preferred) { current = c; return preferred; }
+                    }
+                }
+                Candidate best = null;
+                int bestScore = -1;
+                foreach (Candidate c in list)
+                {
+                    int sc = Score(c);
+                    if (sc > bestScore) { bestScore = sc; best = c; }
+                }
+                current = best;
+                return best.Ip;
+            }
         }
 
         // 配对页上的备选地址列表（单网卡返回空串，页面上什么都不显示）
@@ -1187,12 +1293,14 @@ namespace TypeBridge
                         }
                         break;
                     case "/m":
+                        NotePeerVisit(client);
                         WriteResponse(stream, 200, "text/html; charset=utf-8", Res.Get("mobile.html"));
                         break;
                     case "/status":
                     {
                         // 供扫码页轮询：只回答「有没有连接」和「页面上的码是否仍是当前码」，
-                        // 不回传配对码本身（页面把自己看到的码带在查询串里比对）
+                        // 不回传配对码本身（页面把自己看到的码带在查询串里比对）。
+                        // ip/port 一起带回：电脑换了网络后扫码页据此自动刷新成新地址的二维码
                         bool match = false;
                         string[] kvs = qs.Split('&');
                         for (int i = 0; i < kvs.Length; i++)
@@ -1204,7 +1312,9 @@ namespace TypeBridge
                             }
                         }
                         string json = "{\"connected\":" + (State.ClientCount > 0 ? "true" : "false")
-                            + ",\"match\":" + (match ? "true" : "false") + "}";
+                            + ",\"match\":" + (match ? "true" : "false")
+                            + ",\"ip\":\"" + (NetDetect.CurrentIp() ?? "") + "\""
+                            + ",\"port\":" + BoundPort + "}";
                         WriteResponse(stream, 200, "application/json; charset=utf-8", json);
                         break;
                     }
@@ -1271,6 +1381,29 @@ namespace TypeBridge
                 try { client.Close(); }
                 catch (Exception) { }
             }
+        }
+
+        // 手机端页面被访问的记录（每个来源 IP 只记一次）：
+        // 「扫码后打不开」远程排查时，这一行能直接判断手机到底有没有到达电脑
+        private static readonly HashSet<string> seenPeers = new HashSet<string>();
+        private static readonly object PeerGate = new object();
+
+        private static void NotePeerVisit(TcpClient client)
+        {
+            try
+            {
+                System.Net.IPEndPoint ep = client.Client.RemoteEndPoint as System.Net.IPEndPoint;
+                if (ep == null) return;
+                string peer = ep.Address.ToString();
+                if (peer.Length == 0) return;
+                bool fresh = false;
+                lock (PeerGate)
+                {
+                    if (!seenPeers.Contains(peer)) { seenPeers.Add(peer); fresh = true; }
+                }
+                if (fresh) Log.Info("手机端页面被访问: 来自 " + peer + "（扫码已到达电脑）");
+            }
+            catch (Exception) { }
         }
 
         // 字节级读取 HTTP 头（避免 StreamReader 预读吃掉 WS 升级后的数据）
@@ -1904,8 +2037,9 @@ namespace TypeBridge
             FormBorderStyle = FormBorderStyle.Sizable;
             MaximizeBox = true;
             MinimizeBox = true;
+            // 默认尺寸让「二维码 + 配对码 + 控制按钮」一屏放下（页面是嵌入模式，二维码置顶）
             MinimumSize = new System.Drawing.Size(380, 470);
-            ClientSize = new System.Drawing.Size(380, 470);
+            ClientSize = new System.Drawing.Size(420, 620);
             StartPosition = FormStartPosition.CenterScreen;
             ShowInTaskbar = true;
 
@@ -2004,6 +2138,9 @@ namespace TypeBridge
             networkMenu = new MenuItem("选择网络(扫码地址)");
             networkMenu.Popup += delegate { RefreshNetworkMenu(); };
             menu.MenuItems.Add(networkMenu);
+            // 手机扫码打不开的一键自救：检查并补防火墙放行（会弹一次管理员确认），
+            // 无论如何都把当前扫码地址气泡出来，用户拿手机对照最直观
+            menu.MenuItems.Add("手机连不上？一键修复", delegate { RunConnectivityFix(); });
             startupItem = new MenuItem("", delegate
             {
                 bool want = !AutoStart.IsEnabled();
@@ -2064,6 +2201,54 @@ namespace TypeBridge
             tray.Visible = true;
             tray.DoubleClick += delegate { OpenPair(); };
             PasteGate.Init(tray);   // 文件接收后的剪贴板/粘贴操作走专属 STA 线程
+
+            // 网络守望：电脑换了 WiFi / 插拔网线后，二维码里的旧地址失效是
+            // 「扫码打不开」的高发原因。每 10 秒核对一次当前地址是否还在网卡上，
+            // 失效就自动切到最优网卡并气泡提醒重新扫码（开着的扫码页会自己刷新）。
+            Thread watch = new Thread(new ThreadStart(delegate
+            {
+                while (true)
+                {
+                    Thread.Sleep(10000);
+                    try
+                    {
+                        string newIp = NetDetect.AutoRepairCurrent();
+                        if (newIp != null)
+                        {
+                            Log.Info("网络已变化，扫码地址自动切换为: " + newIp + ":" + port);
+                            PasteGate.Notify("网络已变化，扫码地址已更新为 " + newIp + ":" + port + "，请用手机重新扫码");
+                        }
+                    }
+                    catch (Exception) { }
+                }
+            }));
+            watch.IsBackground = true;
+            watch.Start();
+        }
+
+        // 一键修复的实际动作（在线程池跑：UAC 等待不能卡死托盘菜单）：
+        // 先查防火墙；缺规则就提权补一条全网络类型的放行；最后气泡说明结果
+        private void RunConnectivityFix()
+        {
+            ThreadPool.QueueUserWorkItem(delegate(object o)
+            {
+                string msg;
+                if (FirewallGuard.CheckAllowed())
+                {
+                    msg = "防火墙正常。当前扫码地址 http://" + NetDetect.CurrentIp() + ":" + port
+                        + "。手机仍连不上时请确认：手机和电脑连的是同一个 WiFi，且手机没开流量/代理";
+                }
+                else if (FirewallGuard.Fix())
+                {
+                    msg = "防火墙已放行，请用手机重新扫码（地址 http://" + NetDetect.CurrentIp() + ":" + port + "）";
+                }
+                else
+                {
+                    msg = "放行未完成（刚才的管理员确认框点「是」才能生效）。也可检查手机是否和电脑连同一个 WiFi";
+                }
+                Log.Info("一键修复: " + msg);
+                PasteGate.Notify(msg);
+            });
         }
 
         // 菜单顶部状态行：版本 · 当前地址 · 端口 · 连接状态
@@ -2113,13 +2298,14 @@ namespace TypeBridge
             Log.Info("扫码地址已切换为: " + ip + ":" + port);
             tray.ShowBalloonTip(1500, "TypeBridge", "扫码地址已改为 http://" + ip + ":" + port + "，手机重新扫码即可", ToolTipIcon.Info);
             // 扫码窗口开着的话立即重画二维码，免得还指着旧地址
-            if (pairForm != null && pairForm.Visible) pairForm.ShowPair("http://localhost:" + port + "/pair");
+            if (pairForm != null && pairForm.Visible) pairForm.ShowPair("http://localhost:" + port + "/pair?embed=1");
         }
 
         private void OpenPair()
         {
             if (pairForm == null) { pairForm = new PairForm(); }
-            pairForm.ShowPair("http://localhost:" + port + "/pair");
+            // embed=1：嵌入模式，页面隐藏说明栏、二维码置顶，小窗口打开即可扫码
+            pairForm.ShowPair("http://localhost:" + port + "/pair?embed=1");
         }
 
         internal void ShowPair()
@@ -2208,6 +2394,15 @@ namespace TypeBridge
             }));
             tick.IsBackground = true;
             tick.Start();
+
+            // 防火墙自检：首次运行弹的防火墙询问被点了取消的话，手机永远连不上，
+            // 越早告诉用户越好（免管理员的只读检查）
+            if (!FirewallGuard.CheckAllowed())
+            {
+                Log.Info("!! 未检测到防火墙放行规则（首次运行的弹窗可能被取消了），手机可能连不上。");
+                Log.Info("!! 右键托盘图标选「手机连不上？一键修复」即可放行（会弹一次管理员确认）。");
+                PasteGate.Notify("未检测到防火墙放行规则，手机可能连不上；右键托盘图标选「手机连不上？一键修复」");
+            }
 
             // 启动行为：已加入开机自启 → 静默待命，不弹窗、不再询问任何东西，
             // 客户需要扫码时自己右键托盘图标（或双击图标）选「链接二维码」。

@@ -52,6 +52,8 @@ body.linked .qrwrap{border-color:#34d27b}
 .ips{margin:14px 0 0;text-align:left;font-size:12.5px;color:#6b7a90;line-height:1.8}
 .ips .ipstip{margin:6px 0}
 .ips code{background:#eef2f8;color:#2f4a78;padding:2px 7px;border-radius:5px;font-size:12px}
+.embed .side{display:none}
+.embed .card{max-width:430px}
 .ver{margin-top:14px;font-size:12px;color:#9aa7ba}
 .ver a{color:#9aa7ba}
 code{background:#eef2f8;color:#2f4a78;padding:2px 7px;border-radius:5px;font-family:Consolas,"Courier New",monospace;font-size:12px;word-break:break-all;-webkit-user-select:all;-ms-user-select:all;user-select:all}
@@ -110,6 +112,7 @@ code{background:#eef2f8;color:#2f4a78;padding:2px 7px;border-radius:5px;font-fam
     <div class="info">
       <div class="row" id="fallback"><b>扫码不成功？</b>在手机浏览器地址栏输入 <code>{{URL}}</code>，再输入上方配对码即可连接。</div>
       <div class="row" id="addr"><b>电脑当前地址：</b>{{IP}}:{{PORT}}。手机连不上时，多半是网卡选错了，可在电脑上切换扫码网卡。</div>
+      <div class="row"><b>扫码后打不开？</b>确认手机连的是和电脑<b>同一个 WiFi</b>（不能用流量）。仍不行：电脑上右键托盘图标选「手机连不上？一键修复」。</div>
     </div>
     <!--IPS-->
 
@@ -125,6 +128,15 @@ code{background:#eef2f8;color:#2f4a78;padding:2px 7px;border-radius:5px;font-fam
 <script src="/qrcode.js"></script>
 <script>
 var PAIR_URL = "{{URL}}";
+// 嵌入模式（电脑端托盘弹窗 ?embed=1）：窄窗口里隐藏左侧说明栏，
+// 把连接状态胶囊挪到二维码上方，保证打开窗口第一眼就是二维码，不用往下滚
+(function () {
+  if (location.search.indexOf('embed=1') < 0) return;
+  document.body.className += ' embed';
+  var conn = document.getElementById('conn');
+  var main = document.querySelector('.main');
+  if (conn && main) main.insertBefore(conn, main.firstChild);
+})();
 (function () {
   var statusEl = document.getElementById('status');
   try {
@@ -157,6 +169,7 @@ var PAIR_URL = "{{URL}}";
 // 连接状态轮询：每 2 秒拉一次 /status，同步绿点/灰点；服务端只回答布尔，不回传配对码
 (function () {
   var MY_CODE = '{{CODE}}';
+  var MY_IP = '{{IP}}';
   var conn = document.getElementById('conn');
   var dot = document.getElementById('conndot');
   var txt = document.getElementById('conntxt');
@@ -171,16 +184,18 @@ var PAIR_URL = "{{URL}}";
       try { s = JSON.parse(x.responseText); } catch (e) { }
       if (!s || typeof s.connected === 'undefined') return;
       if (s.match === false) { location.reload(); return; }
+      // 电脑换了网络（WiFi 切换/网线插拔）后地址会变，页面自动刷新成新地址的二维码
+      if (s.ip && MY_IP && s.ip !== MY_IP) { location.reload(); return; }
       if (s.connected) {
         dot.className = 'cdot on';
         txt.textContent = '手机已连接，可以开始输入';
         conn.className = 'on';
-        document.body.className = 'linked';
+        document.body.classList.add('linked');   // 只动 linked，不能覆盖 body 上的 embed 类
       } else {
         dot.className = 'cdot';
         txt.textContent = '等待手机连接…';
         conn.className = '';
-        document.body.className = '';
+        document.body.classList.remove('linked');
       }
     };
     x.send();
