@@ -19,6 +19,7 @@ TypeBridge 麒麟版（Linux）
     python3 typebridge.py --install-autostart    装开机自启
     python3 typebridge.py --uninstall-autostart  卸开机自启
     python3 typebridge.py --ip 192.168.1.5      指定对外局域网 IP（多网卡/代理虚拟网卡时用，会记住）
+    python3 typebridge.py --recv-dir ~/Pictures 指定手机传文件的接收目录（会记住）
 
 注入通道（运行时自动挑选，不用手工配）：
     X11 会话        xdotool > dotool > clipboard
@@ -57,7 +58,7 @@ LOG_FILE = os.path.join(CONF_DIR, "log.txt")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 AUTOSTART_DIR = os.path.expanduser("~/.config/autostart")
 
-VERSION = "v0.5"
+VERSION = "v0.6"
 UPDATE_URL = "https://gitee.com/lanyacp/TypeBridge"
 
 MAX_TEXT = 10000          # 单次最多 1 万字符
@@ -633,10 +634,18 @@ def channel_report():
 # ============================================================
 
 def recv_dir():
-    """接收目录。优先问 xdg-user-dir（麒麟中文桌面实际是 ~/下载），
-    拿不到退回 ~/Downloads。"""
+    """接收目录。用户可用 --recv-dir 指定并记住；默认优先问 xdg-user-dir
+    （麒麟中文桌面实际是 ~/下载），拿不到退回 ~/Downloads。"""
     global _recv_dir_cache
     if _recv_dir_cache:
+        return _recv_dir_cache
+    saved = ""
+    try:
+        saved = (Conf.get("recv_dir", "") or "").strip()
+    except Exception:
+        saved = ""
+    if saved and os.path.isabs(saved):
+        _recv_dir_cache = saved
         return _recv_dir_cache
     d = None
     rc, out, _ = _run(["xdg-user-dir", "DOWNLOAD"], timeout=3)
@@ -1673,6 +1682,8 @@ def main():
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--ip", default=None,
                     help="指定对外局域网 IP（多网卡/有代理虚拟网卡时用，会记住）")
+    ap.add_argument("--recv-dir", default=None,
+                    help="指定手机传文件的接收目录（会记住；默认 下载/TypeBridge接收）")
     ap.add_argument("--channel", default=None,
                     help="强制指定注入通道: xdotool / dotool / clipboard / ydotool")
     ap.add_argument("--selfcheck", action="store_true", help="环境与通道自检，不做注入")
@@ -1688,6 +1699,13 @@ def main():
     if args.uninstall_autostart:
         uninstall_autostart()
         return 0
+    if args.recv_dir:
+        try:
+            os.makedirs(args.recv_dir, exist_ok=True)
+            Conf.set("recv_dir", os.path.abspath(args.recv_dir))
+            Log.info("接收目录已设为: %s" % Conf.get("recv_dir", ""))
+        except Exception as e:
+            Log.info("设置接收目录失败: %s" % e)
     if args.selfcheck:
         return selfcheck()
     if args.test_inject:

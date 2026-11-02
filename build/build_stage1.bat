@@ -21,7 +21,8 @@ rem       UTF-8 as ANSI/GBK and corrupts Chinese string literals)
 
 rem AnyCPU：同一 exe 同时跑 32 位/64 位系统（Win7 有 32 位老机器），
 rem 代码 P/Invoke 已用 IntPtr 自适应位数。
-"%CSC%" /nologo /optimize+ /platform:anycpu /target:winexe ^
+rem /win32icon：资源管理器/任务栏里显示应用图标（ico 小帧为未压缩 BMP，Win10 兼容）
+"%CSC%" /nologo /optimize+ /platform:anycpu /target:winexe /win32icon:src\typebridge.ico ^
   /r:System.dll /r:System.Core.dll /r:System.Drawing.dll ^
   /r:System.Windows.Forms.dll /r:System.Web.Extensions.dll ^
   /res:src\web\index.html,TypeBridgeRes.index.html ^

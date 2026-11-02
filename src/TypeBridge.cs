@@ -6,7 +6,7 @@
 // 运行：build\TypeBridge.exe   右下角托盘常驻，日志写本地文件
 //       已开开机自启 → 静默启动，不弹窗；右键托盘图标可弹扫码窗
 // 托盘菜单：状态行 / 版本号 / 获取更新 / 选择网络 / 扫码窗 / 配对码
-//           / 暂停注入 / 开机自启 / 日志 / 接收文件夹 / 最近接收
+//           / 暂停注入 / 开机自启 / 日志 / 接收文件夹 / 设置接收位置 / 最近接收
 // 新能力（合并自 AirType）：手机传文件/图片到电脑（图片自动粘贴到光标处，
 //   纯 Win32 剪贴板防卡死）、扫码页状态轮询与远程控制（断开/重配对/
 //   打开接收目录）、批量退格撤回护栏、WS 分片重组（微信 XWeb）、深色手机端
@@ -577,9 +577,46 @@ namespace TypeBridge
     internal static class FileSink
     {
         internal const long MaxFile = 200L * 1024 * 1024;   // 单文件上限 200MB
-        private static readonly string Dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            @"Downloads\TypeBridge接收");
+
+        // 接收目录：默认 下载\TypeBridge接收，托盘菜单「设置接收文件夹位置…」可改（记进配置）
+        private static string dir;
+        private static readonly object DirGate = new object();
+
+        private static string DefaultDir()
+        {
+            return Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                @"Downloads\TypeBridge接收");
+        }
+
+        internal static string DirOf()
+        {
+            lock (DirGate)
+            {
+                if (dir == null)
+                {
+                    string saved = Config.RecvDir();
+                    dir = (saved != null && saved.Trim().Length > 0) ? saved : DefaultDir();
+                }
+                return dir;
+            }
+        }
+
+        // 用户更换接收目录：建目录 + 记住选择。返回 null=成功，否则为错误信息
+        internal static string SetDir(string path)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path) || path.Trim().Length == 0) return "目录为空";
+                path = path.Trim();
+                Directory.CreateDirectory(path);
+                lock (DirGate) { dir = path; }
+                Config.SetRecvDir(path);
+                Log.Info("接收文件夹已改为: " + path);
+                return null;
+            }
+            catch (Exception ex) { return ex.Message; }
+        }
 
         private static string Sanitize(string name)
         {
@@ -597,16 +634,17 @@ namespace TypeBridge
         // 在接收目录内生成不重名的落盘路径
         internal static string Prepare(string rawName)
         {
-            Directory.CreateDirectory(Dir);
+            string dirNow = DirOf();
+            Directory.CreateDirectory(dirNow);
             string name = Sanitize(rawName);
-            string path = Path.Combine(Dir, name);
+            string path = Path.Combine(dirNow, name);
             if (File.Exists(path))
             {
                 string baseName = Path.GetFileNameWithoutExtension(name);
                 string ext = Path.GetExtension(name);
                 for (int n = 1; ; n++)
                 {
-                    path = Path.Combine(Dir, baseName + "(" + n + ")" + ext);
+                    path = Path.Combine(dirNow, baseName + "(" + n + ")" + ext);
                     if (!File.Exists(path)) break;
                 }
             }
@@ -725,8 +763,6 @@ namespace TypeBridge
             Log.Info("已粘贴图片到前台: " + Path.GetFileName(path));
             return "已粘贴到当前光标处" + tail;
         }
-
-        internal static string DirOf() { return Dir; }
     }
 
     // ---------------- 配对码 ----------------
@@ -754,7 +790,7 @@ namespace TypeBridge
     // ---------------- 版本与更新地址 ----------------
     internal static class AppInfo
     {
-        internal const string Version = "v0.5";
+        internal const string Version = "v0.6";
         internal const string UpdateUrl = "https://gitee.com/lanyacp/TypeBridge";
         internal const string UpdateUrlText = "gitee.com/lanyacp/TypeBridge";
     }
@@ -814,6 +850,32 @@ namespace TypeBridge
                 }
             }
             catch (Exception ex) { Log.Info("保存网络选择失败: " + ex.Message); }
+        }
+
+        // 接收文件夹位置（空 = 默认 下载\TypeBridge接收）
+        internal static string RecvDir()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(Key, false))
+                {
+                    if (k == null) return "";
+                    return (k.GetValue("RecvDir") as string) ?? "";
+                }
+            }
+            catch (Exception) { return ""; }
+        }
+
+        internal static void SetRecvDir(string path)
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.CreateSubKey(Key))
+                {
+                    if (k != null) k.SetValue("RecvDir", path ?? "", RegistryValueKind.String);
+                }
+            }
+            catch (Exception ex) { Log.Info("保存接收位置失败: " + ex.Message); }
         }
     }
 
@@ -2098,6 +2160,7 @@ namespace TypeBridge
         private MenuItem startupItem;
         private MenuItem statusItem;
         private MenuItem networkMenu;
+        private TrayGuard trayGuard;
         private int port;
         private PairForm pairForm;
 
@@ -2161,6 +2224,7 @@ namespace TypeBridge
                 try { Process.Start("explorer.exe", FileSink.DirOf()); }
                 catch (Exception) { }
             });
+            menu.MenuItems.Add("设置接收文件夹位置…", delegate { ChooseRecvDir(); });
             // 最近接收：子菜单弹出时实时列目录，点条目直接打开对应文件
             MenuItem recentItem = new MenuItem("最近接收");
             recentItem.Popup += delegate
@@ -2201,6 +2265,7 @@ namespace TypeBridge
             tray.Visible = true;
             tray.DoubleClick += delegate { OpenPair(); };
             PasteGate.Init(tray);   // 文件接收后的剪贴板/粘贴操作走专属 STA 线程
+            trayGuard = new TrayGuard(tray);   // explorer 重启/任务栏重建后把托盘图标挂回去
 
             // 网络守望：电脑换了 WiFi / 插拔网线后，二维码里的旧地址失效是
             // 「扫码打不开」的高发原因。每 10 秒核对一次当前地址是否还在网卡上，
@@ -2249,6 +2314,63 @@ namespace TypeBridge
                 Log.Info("一键修复: " + msg);
                 PasteGate.Notify(msg);
             });
+        }
+
+        // 选择新的接收文件夹：建目录 + 记住，之后手机传的文件都落在这里
+        private void ChooseRecvDir()
+        {
+            try
+            {
+                using (FolderBrowserDialog dlg = new FolderBrowserDialog())
+                {
+                    dlg.Description = "选择手机传来的文件保存到哪里（默认：下载\\TypeBridge接收）";
+                    dlg.ShowNewFolderButton = true;
+                    try { dlg.SelectedPath = FileSink.DirOf(); } catch (Exception) { }
+                    if (dlg.ShowDialog() == DialogResult.OK)
+                    {
+                        string err = FileSink.SetDir(dlg.SelectedPath);
+                        if (err != null)
+                        {
+                            MessageBox.Show("设置接收位置失败: " + err, "TypeBridge");
+                        }
+                        else
+                        {
+                            tray.ShowBalloonTip(2000, "TypeBridge",
+                                "以后接收的文件将保存到：" + dlg.SelectedPath, ToolTipIcon.Info);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) { Log.Info("选择接收位置失败: " + ex.Message); }
+        }
+
+        // 托盘图标守护：explorer.exe 重启（或任务栏偶发重建）后，系统会广播
+        // TaskbarCreated，NotifyIcon 不重新登记图标就会永久消失——这是
+        // 「右下角没有图标」的一个已知成因。监听广播并重挂图标。
+        private class TrayGuard : NativeWindow
+        {
+            private readonly NotifyIcon icon;
+            private readonly uint taskbarCreated;
+
+            internal TrayGuard(NotifyIcon icon)
+            {
+                this.icon = icon;
+                taskbarCreated = RegisterWindowMessage("TaskbarCreated");
+                CreateHandle(new CreateParams());   // 一个陪跑的隐藏窗口，只为收广播
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                if (taskbarCreated != 0 && m.Msg == (int)taskbarCreated)
+                {
+                    try { icon.Visible = false; icon.Visible = true; }
+                    catch (Exception) { }
+                }
+                base.WndProc(ref m);
+            }
+
+            [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+            private static extern uint RegisterWindowMessage(string name);
         }
 
         // 菜单顶部状态行：版本 · 当前地址 · 端口 · 连接状态
@@ -2410,6 +2532,9 @@ namespace TypeBridge
             if (autostartOn)
             {
                 Log.Info("已开启开机自启：静默启动，需要扫码时右键托盘图标选「打开手机扫码连接页面」");
+                // Win10/11 默认把新程序的托盘图标收进隐藏区（^），不说一声的话
+                // 用户会以为程序没在运行。这里只弹一次轻量气泡（非弹窗），说明去向。
+                PasteGate.Notify("TypeBridge 已在后台运行，手机可直接扫码；图标若不在右下角，请点任务栏的 ^ 隐藏区");
             }
             else
             {
