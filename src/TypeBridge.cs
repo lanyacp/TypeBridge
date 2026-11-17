@@ -790,7 +790,7 @@ namespace TypeBridge
     // ---------------- 版本与更新地址 ----------------
     internal static class AppInfo
     {
-        internal const string Version = "v0.6";
+        internal const string Version = "v0.7";
         internal const string UpdateUrl = "https://gitee.com/lanyacp/TypeBridge";
         internal const string UpdateUrlText = "gitee.com/lanyacp/TypeBridge";
     }

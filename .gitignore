@@ -4,6 +4,10 @@ tools/
 
 # deb 打包中间产物
 build/debroot/
+build/*.deb
+
+# 三系统整合包（发布产物，网盘分发，不进仓库）
+build/pkg/
 
 # 会话/内部数据（隐私，不公开）
 memory/

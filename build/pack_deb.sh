@@ -121,6 +121,8 @@ EOF
 chmod 0644 "$PKG/usr/share/applications/typebridge.desktop"
 
 # ---- 打包 ----
+OUT="$ROOT_DIR/build/typebridge_${VER}_all.deb"
+
 if [ "${1:-}" = "--stage-only" ]; then
     echo "[stage-only] 目录结构已生成于 $PKG："
     find "$PKG" -type f | sort
@@ -128,13 +130,28 @@ if [ "${1:-}" = "--stage-only" ]; then
     exit 0
 fi
 
+OUT="$ROOT_DIR/build/typebridge_${VER}_all.deb"
+
 if ! command -v dpkg-deb >/dev/null 2>&1; then
-    echo "!! 没找到 dpkg-deb（需在 Linux/Debian 系上打包；Windows Git Bash 没有）。"
-    echo "!! 可先用 --stage-only 核验目录结构，再到 Linux 机器上正式打包。"
-    exit 1
+    # 没有 dpkg-deb（Windows Git Bash 等）：按 deb(5) 规范手工组装兜底，
+    # 产物结构一致但未经真实 dpkg 安装验证，分发前建议在 Debian 系机器上验装
+    PYBIN=""
+    for c in python3 python py; do
+        if command -v "$c" >/dev/null 2>&1; then PYBIN="$c"; break; fi
+    done
+    if [ -z "$PYBIN" ]; then
+        echo "!! 手工组装需要 python3（或 python/py）。"
+        exit 1
+    fi
+    echo "[i] 未找到 dpkg-deb，改用手工组装（build_deb_manual.py）..."
+    "$PYBIN" "$ROOT_DIR/build/build_deb_manual.py" "$STAGE" "$PKG" "$OUT"
+    echo "[提示] 手工组装的 deb 建议先在一台 Debian 系机器上"
+    echo "       sudo apt install ./$OUT 验装一遍，再对外分发；"
+    echo "       有 Linux 环境时优先用 dpkg-deb 正式构建（本脚本自动走官方路径）。"
+    exit 0
 fi
 
-OUT="$ROOT_DIR/build/typebridge_${VER}_all.deb"
 dpkg-deb --build --root-owner-group "$PKG" "$OUT"
 echo "[OK] $OUT"
 echo "校验: dpkg-deb -I \"$OUT\""
+
