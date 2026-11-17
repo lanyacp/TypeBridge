@@ -43,6 +43,15 @@
 - **Windows**：托盘右键 →「选择网络」，选中真正上网的那块网卡（会记住，下次启动还用它）；配对页上也会列出全部备选地址，扫码不行就换一个。
 - **麒麟**：启动时加 `--ip 192.168.x.x` 指定（会记住）；或打开配对页，页面下方列出了所有网络地址，哪个能连用哪个。
 
+## 统信 UOS
+
+与银河麒麟同一套 Linux 版（单引擎、不分叉），安装方式二选一：
+
+- **脚本安装**（免管理员，装到用户目录）：拷贝整个 `kylin/` 文件夹到 UOS 机器，运行 `bash install.sh`。安装向导会自动识别发行版（统信 UOS / 银河麒麟）并按需补装依赖。
+- **deb 安装**（企业 IT 内部源统一推送）：在任意 Linux/Debian 系机器上 `bash build/pack_deb.sh` 生成 `build/typebridge_x.y_all.deb`（Architecture: all，一包通吃 AMD64 / ARM64 飞腾鲲鹏 / LoongArch64 龙芯），客户端 `sudo apt install ./typebridge_x.y_all.deb` 或走内网源。装完开始菜单搜 TypeBridge，终端 `typebridge --selfcheck` 环境自检。
+
+Wayland 会话（V25 / V20 Next）如自检提示通道不可用：注销后在登录界面的会话选择器里选 X11（或在控制中心关闭 Wayland），兼容性最好。适配细节与测试矩阵见 docs/统信UOS适配方案.md。
+
 ## 启动行为
 
 - 已开启开机自启：开机后**静默**在后台待命，不弹窗、不再询问；需要扫码时右键托盘图标（Windows）或双击 TypeBridge 图标（麒麟）即可。
@@ -56,14 +65,14 @@ Windows（需要 .NET Framework 4.x，系统自带 csc）：
 build\build_stage1.bat
 ```
 
-麒麟：直接 `python3 kylin/typebridge.py` 运行，或 `bash kylin/install.sh` 一键安装。
+麒麟 / 统信 UOS：直接 `python3 kylin/typebridge.py` 运行，或 `bash kylin/install.sh` 一键安装；企业统一下发用 `bash build/pack_deb.sh` 打 deb（Linux 上执行，详见 docs/统信UOS适配方案.md）。
 
 ## 目录结构
 
 ```
 src/          Windows 版源码 + 手机端页面 + 应用图标
-kylin/        麒麟版源码 + web + 一键安装脚本
-build/        编译好的 Windows 程序 + 编译脚本
+kylin/        Linux 版源码（银河麒麟 / 统信 UOS）+ web + 一键安装脚本
+build/        编译好的 Windows 程序 + 编译脚本 + deb 打包脚本
 docs/         实施方案与麒麟系统适配评估（设计文档）
 ```
 

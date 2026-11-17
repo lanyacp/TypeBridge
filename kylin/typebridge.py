@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TypeBridge 麒麟版（Linux）
+TypeBridge Linux 版（银河麒麟 / 统信 UOS）
 手机扫码 → 局域网 WebSocket → 把文字送进电脑前台输入框，图片/文件传到电脑接收目录
 （图片可顺手粘贴到光标处）
 
@@ -58,7 +58,7 @@ LOG_FILE = os.path.join(CONF_DIR, "log.txt")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 AUTOSTART_DIR = os.path.expanduser("~/.config/autostart")
 
-VERSION = "v0.6"
+VERSION = "v0.7"
 UPDATE_URL = "https://gitee.com/lanyacp/TypeBridge"
 
 MAX_TEXT = 10000          # 单次最多 1 万字符
@@ -546,9 +546,45 @@ BY_NAME = dict(BUILDERS)
 ALL_CHANNELS = "xdotool / dotool / clipboard / ydotool"
 
 
+def detect_distro(path="/etc/os-release"):
+    """识别发行版：读 /etc/os-release，返回 (ID小写, 显示名)。
+
+    识别结果只影响文案与自检提示，不写死任何逻辑；读不到（非 Linux、
+    权限受限）按通用 Linux 处理。同一套引擎跑麒麟和统信 UOS，不分叉。
+    """
+    did, pretty = "", ""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k, v = k.strip(), v.strip().strip('"')
+                if k == "ID":
+                    did = v.lower()
+                elif k == "PRETTY_NAME":
+                    pretty = v
+                elif k == "NAME" and not pretty:
+                    pretty = v
+    except Exception:
+        pass
+    return did, pretty
+
+
+def distro_label():
+    """给人看的发行版标签（自检/日志/安装器共用）。"""
+    did, pretty = detect_distro()
+    if did in ("uos", "deepin"):
+        return "统信 UOS"
+    if did in ("kylin", "ukylin"):
+        return "银河麒麟"
+    return pretty or "Linux（未识别，按通用 Linux 处理）"
+
+
 def describe_env():
     session = os.environ.get("XDG_SESSION_TYPE", "未设置")
     lines = [
+        "发行版: %s" % distro_label(),
         "会话类型 XDG_SESSION_TYPE = %s" % session,
         "桌面环境 XDG_CURRENT_DESKTOP = %s" % os.environ.get("XDG_CURRENT_DESKTOP", "未设置"),
         "DISPLAY = %s    WAYLAND_DISPLAY = %s" % (
@@ -1587,7 +1623,7 @@ def uninstall_autostart():
 
 def selfcheck():
     print("=" * 54)
-    print(" TypeBridge %s 麒麟版 自检（不做任何注入）" % VERSION)
+    print(" TypeBridge %s Linux 版 自检（不做任何注入）" % VERSION)
     print("=" * 54)
     session, env_lines, rows = channel_report()
     for l in env_lines:
@@ -1611,9 +1647,15 @@ def selfcheck():
             print("       加组必须注销重新登录才生效，只重开终端不算。")
             print("    2) 装剪贴板工具兜底：sudo apt install wl-clipboard")
             print("       剪贴板通道还要有个能发 Ctrl+V 的工具（xdotool 或 dotool）")
-            print("    3) 都不行就退回 X11 会话：")
-            print("       编辑 /etc/gdm3/custom.conf，设 WaylandEnable=false")
-            print("       然后 sudo systemctl restart gdm3，重新登录后再跑自检")
+            print("    3) 都不行就退回 X11 会话（兼容性最好）：")
+            did, _ = detect_distro()
+            if did in ("uos", "deepin"):
+                print("       统信 UOS：注销后回到登录界面，在密码框旁/右下角的")
+                print("       会话选择器里选 X11；或在 控制中心 → 系统 → 显示 里")
+                print("       关闭 Wayland（不同版本入口略有差异）。切完重跑自检。")
+            else:
+                print("       麒麟：编辑 /etc/gdm3/custom.conf，设 WaylandEnable=false，")
+                print("       然后 sudo systemctl restart gdm3，重新登录后再跑自检")
         else:
             print("    1) 装 xdotool（X11 下首选，免权限，不占剪贴板）")
             print("         sudo apt install xdotool")
@@ -1678,7 +1720,7 @@ def test_inject(seconds=5, text=None):
 # ============================================================
 
 def main():
-    ap = argparse.ArgumentParser(description="TypeBridge 麒麟版（Linux）")
+    ap = argparse.ArgumentParser(description="TypeBridge Linux 版（银河麒麟 / 统信 UOS）")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--ip", default=None,
                     help="指定对外局域网 IP（多网卡/有代理虚拟网卡时用，会记住）")
@@ -1751,6 +1793,7 @@ def main():
     State.qr_ip = ip
 
     Log.info("========== TypeBridge %s 启动 ==========" % VERSION)
+    Log.info("发行版: %s" % distro_label())
     if len(ips) > 1:
         Log.info("检测到多个局域网地址: " + "、".join("%s(%s)" % c for c in ips))
     Log.info("扫码地址(当前网卡): http://%s:%d  手机连不上时重启加 --ip 换一个地址" % (ip, args.port))

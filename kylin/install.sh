@@ -53,6 +53,26 @@ SRC_WEB="$SCRIPT_DIR/web"
 SRC_ICON="$SCRIPT_DIR/assets/typebridge-icon.svg"
 [ -f "$SRC_ICON" ] || SRC_ICON="$SCRIPT_DIR/typebridge-icon.svg"
 
+# ---------- 发行版识别（银河麒麟 / 统信 UOS / 其他，只影响文案与提示，不影响逻辑） ----------
+# 同一套脚本装麒麟也装统信：依赖包名两边一致（都是 apt），识别结果只用于提示语。
+DISTRO_ID=""
+DISTRO_NAME=""
+if [ -f /etc/os-release ]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release 2>/dev/null || true
+    DISTRO_ID="$(printf '%s' "${ID:-}" | tr '[:upper:]' '[:lower:]')"
+    DISTRO_NAME="${PRETTY_NAME:-${NAME:-}}"
+fi
+distro_label() {
+    case "$DISTRO_ID" in
+        uos|deepin)      echo "统信 UOS" ;;
+        kylin|ukylin)    echo "银河麒麟" ;;
+        *)               echo "${DISTRO_NAME:-Linux}" ;;
+    esac
+}
+# deb 安装路径（build/pack_deb.sh 的产物），修复入口认得它，装了 deb 也能自检
+DEB_APP_DIR="/usr/share/typebridge"
+
 # 检测函数：会写全局变量 SESSION / MISSING / CAN_INSTALL
 SESSION=""
 MISSING=""
@@ -311,6 +331,7 @@ run_check() {
     fi
     local py="$INSTALL_DIR/typebridge.py"
     [ -f "$py" ] || py="$SCRIPT_DIR/typebridge.py"
+    [ -f "$py" ] || py="$DEB_APP_DIR/typebridge.py"   # deb 安装的机器也能自检/修复
     if [ ! -f "$py" ]; then
         fail_exit "找不到 typebridge.py，请重新安装。"
     fi
@@ -380,7 +401,7 @@ main() {
         return 0
     fi
 
-    echo "TypeBridge 麒麟版 一键安装向导（全程自动模式）"
+    echo "TypeBridge 一键安装向导（全程自动模式 | 已识别系统: $(distro_label)）"
 
     # 欢迎页（自动模式直接开始）
     if ! confirm "欢迎使用 TypeBridge 跨屏输入工具！\n\n功能：手机打字/语音 → 电脑光标处直接出字，不用传文件。\n\n安装向导会：\n  ① 检测这台电脑的环境\n  ② 安装所需依赖（会要一次管理员密码）\n  ③ 安装 TypeBridge 并创建桌面图标\n\n现在开始吗？" "开始安装" "退出"; then
@@ -391,7 +412,8 @@ main() {
     detect_session
     detect_tools
 
-    local det="显示协议：$SESSION"
+    local det="系统环境: $(distro_label)${DISTRO_NAME:+（$DISTRO_NAME）}
+显示协议：$SESSION"
     if [ "$SESSION" = "X11" ]; then
         det="$det\n说明：X11 会话，可以用 xdotool 直接键入，体验最好。"
     elif [ "$SESSION" = "Wayland" ]; then

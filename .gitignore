@@ -2,6 +2,9 @@
 tools/
 *.zip
 
+# deb 打包中间产物
+build/debroot/
+
 # 会话/内部数据（隐私，不公开）
 memory/
 .workbuddy/
