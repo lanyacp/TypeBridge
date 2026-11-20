@@ -137,20 +137,51 @@ var PAIR_URL = "{{URL}}";
   var main = document.querySelector('.main');
   if (conn && main) main.insertBefore(conn, main.firstChild);
 })();
+// 兼容层：老 IE（Win7 未升级时只有 IE8）没有 textContent/classList/JSON/canvas/onload。
+// 页面核心诉求是"把二维码画出来"；状态轮询和控制按钮在老引擎上尽力而为。
+function setText(el, t) {
+  try { if ('textContent' in el) { el.textContent = t; } else { el.innerText = t; } } catch (e) { }
+}
+function bodyAddClass(c) {
+  try {
+    if (document.body.classList) { document.body.classList.add(c); return; }
+    var cls = document.body.className.split(/\s+/), i;
+    for (i = 0; i < cls.length; i++) { if (cls[i] === c) return; }
+    document.body.className += ' ' + c;
+  } catch (e) { }
+}
+function bodyRemoveClass(c) {
+  try {
+    if (document.body.classList) { document.body.classList.remove(c); return; }
+    var cls = document.body.className.split(/\s+/), out = [], i;
+    for (i = 0; i < cls.length; i++) { if (cls[i] && cls[i] !== c) out.push(cls[i]); }
+    document.body.className = out.join(' ');
+  } catch (e) { }
+}
+function parseJson(t) {
+  try { if (window.JSON && window.JSON.parse) { return JSON.parse(t); } } catch (e) { }
+  try { return eval('(' + t + ')'); } catch (e) { return null; }   // 内容来自本机服务，格式固定可控
+}
+function getXhr() {
+  try { return new XMLHttpRequest(); } catch (e) { }
+  try { return new ActiveXObject('Microsoft.XMLHTTP'); } catch (e) { return null; }   // 老 IE
+}
+// 二维码绘制四级降级：canvas(IE9+/现代) → GIF 图片(IE8，库自带 GIF 编码器 + data URI) → 表格 → 手动输码提示
 (function () {
   var statusEl = document.getElementById('status');
+  var qr = qrcode(0, 'M');
+  qr.addData(PAIR_URL);
+  qr.make();
+  var count = qr.getModuleCount();
+  var cell = Math.max(4, Math.floor(260 / count));
+  var canvasOk = false;
   try {
-    var qr = qrcode(0, 'M');
-    qr.addData(PAIR_URL);
-    qr.make();
-    var count = qr.getModuleCount();
-    var scale = Math.max(4, Math.floor(260 / count));
-    var border = 2;
+    var scale = cell, border = 2;
     var size = (count + border * 2) * scale;
     var canvas = document.getElementById('qr');
     canvas.width = size;
     canvas.height = size;
-    var ctx = canvas.getContext('2d');
+    var ctx = canvas.getContext('2d');   // IE8 没有这个上下文，从这里进降级
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, size, size);
     ctx.fillStyle = '#0d1b33';
@@ -161,9 +192,22 @@ var PAIR_URL = "{{URL}}";
         }
       }
     }
-    statusEl.textContent = '二维码已就绪，请用手机扫码';
-  } catch (e) {
-    statusEl.textContent = '二维码生成失败，请使用下方地址手动输入';
+    canvasOk = true;
+    setText(statusEl, '二维码已就绪，请用手机扫码');
+  } catch (e) { canvasOk = false; }
+  if (!canvasOk) {
+    try {
+      document.getElementById('qrbox').innerHTML = qr.createImgTag(cell, 4, '配对二维码');
+      setText(statusEl, '二维码已就绪（兼容模式），请用手机扫码');
+    } catch (e2) {
+      try {
+        var tbl = qr.createTableTag(Math.max(2, Math.floor(260 / count)), 2);
+        document.getElementById('qrbox').innerHTML = '<div style="overflow:auto">' + tbl + '</div>';
+        setText(statusEl, '二维码已就绪（兼容模式），请用手机扫码');
+      } catch (e3) {
+        setText(statusEl, '二维码生成失败：请在手机上手动输入下方地址');
+      }
+    }
   }
 })();
 // 连接状态轮询：每 2 秒拉一次 /status，同步绿点/灰点；服务端只回答布尔，不回传配对码
@@ -174,31 +218,29 @@ var PAIR_URL = "{{URL}}";
   var dot = document.getElementById('conndot');
   var txt = document.getElementById('conntxt');
   function poll() {
-    var x;
-    try { x = new XMLHttpRequest(); } catch (e) { return; }
-    if (!x || !x.overrideMimeType) { conn.style.display = 'none'; return; }
+    var x = getXhr();
+    if (!x) { return; }
     x.open('GET', '/status?c=' + encodeURIComponent(MY_CODE), true);
-    x.timeout = 3000;
-    x.onload = function () {
-      var s = null;
-      try { s = JSON.parse(x.responseText); } catch (e) { }
-      if (!s || typeof s.connected === 'undefined') return;
+    x.onreadystatechange = function () {           // 老兼容写法：IE8 的 XHR 没有 onload/timeout
+      if (x.readyState !== 4) { return; }
+      var s = parseJson(x.responseText);
+      if (!s || typeof s.connected === 'undefined') { return; }
       if (s.match === false) { location.reload(); return; }
       // 电脑换了网络（WiFi 切换/网线插拔）后地址会变，页面自动刷新成新地址的二维码
       if (s.ip && MY_IP && s.ip !== MY_IP) { location.reload(); return; }
       if (s.connected) {
         dot.className = 'cdot on';
-        txt.textContent = '手机已连接，可以开始输入';
+        setText(txt, '手机已连接，可以开始输入');
         conn.className = 'on';
-        document.body.classList.add('linked');   // 只动 linked，不能覆盖 body 上的 embed 类
+        bodyAddClass('linked');   // 只动 linked，不能覆盖 body 上的 embed 类
       } else {
         dot.className = 'cdot';
-        txt.textContent = '等待手机连接…';
+        setText(txt, '等待手机连接…');
         conn.className = '';
-        document.body.classList.remove('linked');
+        bodyRemoveClass('linked');
       }
     };
-    x.send();
+    try { x.send(); } catch (e) { }
   }
   poll();
   setInterval(poll, 2000);
@@ -207,19 +249,20 @@ var PAIR_URL = "{{URL}}";
 (function () {
   var msg = document.getElementById('ctrlmsg');
   function ctrl(act, btn) {
-    var x;
-    try { x = new XMLHttpRequest(); } catch (e) { return; }
-    if (!x || !x.overrideMimeType) { msg.textContent = '当前环境不支持'; return; }
+    var x = getXhr();
+    if (!x) { setText(msg, '当前环境不支持'); return; }
     btn.disabled = true;
     x.open('GET', '/ctrl?act=' + act + '&c=' + encodeURIComponent('{{CODE}}'), true);
-    x.timeout = 3000;
-    function done(t) { msg.textContent = t; btn.disabled = false; }
-    x.onload = function () {
-      if (x.status === 200) done(act === 'disconnect' ? '已断开' : (act === 'opendir' ? '已打开接收文件夹' : '已重新配对…'));
-      else done('失败：' + (x.responseText || x.status));
+    x.onreadystatechange = function () {
+      if (x.readyState !== 4) { return; }
+      if (x.status === 200) {
+        setText(msg, act === 'disconnect' ? '已断开' : (act === 'opendir' ? '已打开接收文件夹' : '已重新配对…'));
+      } else {
+        setText(msg, '失败：' + (x.responseText || x.status));
+      }
+      btn.disabled = false;
     };
-    x.onerror = x.ontimeout = function () { done('请求失败，请重试'); };
-    try { x.send(); } catch (e) { done('请求失败，请重试'); }
+    try { x.send(); } catch (e) { setText(msg, '请求失败，请重试'); btn.disabled = false; }
   }
   document.getElementById('btndisc').onclick = function () { ctrl('disconnect', this); };
   document.getElementById('btnrecode').onclick = function () { ctrl('recode', this); };
