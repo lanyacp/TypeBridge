@@ -58,7 +58,7 @@ LOG_FILE = os.path.join(CONF_DIR, "log.txt")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 AUTOSTART_DIR = os.path.expanduser("~/.config/autostart")
 
-VERSION = "v0.8"
+VERSION = "v0.9"
 UPDATE_URL = "https://gitee.com/lanyacp/TypeBridge"
 
 MAX_TEXT = 10000          # 单次最多 1 万字符
@@ -795,12 +795,7 @@ class WsSession(object):
         self.recv_got = 0
         self.last_ack = 0
         self.recv_paste = False
-        # 撤回护栏：本会话注入过的字符数。Linux 侧没有低成本的前台窗口监听，
-        # 这里不做换窗归零，只能防住「撤回次数超过自己注入量」的越界删除
-        self.injected = 0
-        # 焦点切换保护：目标窗口一变就暂停实时同步，文字留在手机输入框里不丢
-        self.last_fg = None
-        self.sync_hold = False
+
 
     # ---- 会话互斥：新连接顶掉旧连接 ----
     @classmethod
@@ -1016,9 +1011,6 @@ class WsSession(object):
                 return True
             if self._inject(lambda: self.injector.type_text(text)):
                 Log.info("注入 %d 字符" % len(text))
-                self.injected += len(text)
-                self.sync_hold = False            # 手动发送=用户已放好光标，解除同步暂停
-                self.last_fg = foreground_title()
                 self.send_ack(len(text))
             return True
 
@@ -1027,23 +1019,6 @@ class WsSession(object):
             if State.paused:
                 self.send_error("注入已暂停")
                 return True
-            # 焦点切换保护：注入目标窗口变了（用户误触点了别处），继续灌会把
-            # 后面的文字送进错误窗口。这里拒绝本条增量并通知手机自动切回手动——
-            # 文字还在手机输入框里，放好光标后点「发送」或「重发」即可，不用重打。
-            fg = foreground_title()
-            if self.last_fg is None:
-                self.last_fg = fg                    # 会话第一笔：只记录基线，不拦截
-            elif fg != self.last_fg:
-                self.last_fg = fg
-                self.sync_hold = True
-                self.injected = 0
-                Log.info("焦点已切换，暂停实时同步（当前: %s）" % fg[:40])
-                self.send_json({"type": "note", "reason": "focus_changed",
-                                "msg": "电脑窗口已切换（%s），实时同步已暂停并切回手动发送。"
-                                       "放好光标后点「发送」或「重发」，文字没有丢。" % fg[:30]})
-                return True
-            if self.sync_hold:
-                return True                          # 保持暂停，等手动发送解除
             text = msg.get("text") or ""
             try:
                 back = int(msg.get("back") or 0)
@@ -1065,7 +1040,6 @@ class WsSession(object):
 
             if self._inject(_do_sync):
                 Log.info("同步 退格%d 注入%d字符" % (back, len(text)))
-                self.injected = max(0, self.injected - back) + len(text)
                 self.send_ack(len(text))
             return True
 
@@ -1074,7 +1048,6 @@ class WsSession(object):
                 self.send_error("注入已暂停")
                 return True
             if self._inject(lambda: self.injector.press("Enter")):
-                self.injected += 1   # 手机端把换行也算进镜像，这里同步记账
                 self.send_ack(0)
             return True
 
@@ -1087,16 +1060,7 @@ class WsSession(object):
             except Exception:
                 count = 1
             count = max(1, min(count, MAX_TEXT))
-            # 单个退格是普通编辑动作，放行；批量退格（撤回）只能删本会话注入过的内容
-            if count > 1:
-                if self.injected <= 0:
-                    self.send_error("当前窗口没有可撤回的内容（若刚切换过窗口，撤回已失效）")
-                    return True
-                if count > self.injected:
-                    self.send_error("本会话只注入过 %d 个字符，撤回已截断" % self.injected)
-                    count = self.injected
             if self._inject(lambda: self.injector.press("BackSpace", count)):
-                self.injected = max(0, self.injected - count)
                 self.send_ack(count)
             return True
 

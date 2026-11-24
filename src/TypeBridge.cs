@@ -792,7 +792,7 @@ namespace TypeBridge
     // ---------------- 版本与更新地址 ----------------
     internal static class AppInfo
     {
-        internal const string Version = "v0.8";
+        internal const string Version = "v0.9";
         internal const string UpdateUrl = "https://gitee.com/lanyacp/TypeBridge";
         internal const string UpdateUrlText = "gitee.com/lanyacp/TypeBridge";
     }
@@ -1566,12 +1566,6 @@ namespace TypeBridge
         private string recvPath;
         private long recvSize, recvGot, lastAckGot;
         private bool recvPaste;
-        // 撤回护栏：本会话在当前前台窗口里实际注入过的字符数与前台窗口标识。
-        // 前台窗口一变，配额归零——批量退格只允许删自己注进去的内容
-        private int injectedChars;
-        private string lastFg;
-        // 焦点切换保护：实时同步时目标窗口一变就暂停灌入，文字留在手机输入框不丢
-        private bool syncHold;
 
         internal WsSession(TcpClient client, NetworkStream stream, string request)
         {
@@ -1612,13 +1606,12 @@ namespace TypeBridge
             catch (Exception) { }
         }
 
-        // 给手机发一条普通提示（不标红不改连接状态）：粘贴真实结果/取消确认/焦点切换
-        internal void SendNote(string msg, string reason = null)
+        // 给手机发一条普通提示（不标红不改连接状态）：粘贴真实结果/取消确认
+        internal void SendNote(string msg)
         {
             Dictionary<string, object> note = new Dictionary<string, object>();
             note["type"] = "note";
             note["msg"] = msg;
-            if (reason != null) note["reason"] = reason;
             try { SendJson(note); }
             catch (Exception) { }
         }
@@ -1760,11 +1753,8 @@ namespace TypeBridge
                     if (text.Length == 0) return true;
                     if (text.Length > 10000) { SendError("单次最多1万字符"); return true; }
                     if (State.Paused) { SendError("注入已暂停"); return true; }
-                    FgCheck();
-                    syncHold = false;   // 手动发送=用户已放好光标，解除同步暂停
                     State.LastText = text;
                     uint sent = Inject.Text(text);
-                    injectedChars += text.Length;
                     Log.Info("注入 " + text.Length + " 字符 (" + sent + " 事件)");
                     SendAck(true, text.Length);
                     return true;
@@ -1772,16 +1762,13 @@ namespace TypeBridge
                 case "enter":
                 {
                     if (State.Paused) { SendError("注入已暂停"); return true; }
-                    FgCheck();
                     Inject.Key(0x0D, 1);
-                    injectedChars++;   // 手机端把换行也算进镜像（lastSent），这里同步记账
                     SendAck(true, 0);
                     return true;
                 }
                 case "backspace":
                 {
                     if (State.Paused) { SendError("注入已暂停"); return true; }
-                    FgCheck();
                     int count = 1;
                     object c;
                     if (dict.TryGetValue("count", out c))
@@ -1791,22 +1778,7 @@ namespace TypeBridge
                     }
                     if (count < 1) count = 1;
                     if (count > 10000) count = 10000;
-                    // 单个退格是普通编辑动作，放行；批量退格（撤回）只能删本会话在当前窗口注入过的内容
-                    if (count > 1)
-                    {
-                        if (injectedChars <= 0)
-                        {
-                            SendError("当前窗口没有可撤回的内容（若刚切换过窗口，撤回已失效）");
-                            return true;
-                        }
-                        if (count > injectedChars)
-                        {
-                            SendError("自上次切换窗口以来只注入过 " + injectedChars + " 个字符，撤回已截断");
-                            count = injectedChars;
-                        }
-                    }
                     Inject.Key(0x08, count);
-                    injectedChars = injectedChars > count ? injectedChars - count : 0;
                     SendAck(true, count);
                     return true;
                 }
@@ -1818,26 +1790,6 @@ namespace TypeBridge
                     // 实时同步：原子完成「退格 N 次 + 输入增量文本」
                     // 客户端把输入框当作电脑上文本的镜像，算最长公共前缀求增量
                     if (State.Paused) { SendError("注入已暂停"); return true; }
-                    // 焦点切换保护：注入目标窗口变了（用户误触点了别处），继续灌会把
-                    // 后面的文字送进错误窗口。这里拒绝本条增量并通知手机自动切回手动——
-                    // 文字还在手机输入框里，放好光标后点「发送」或「重发」即可，不用重打。
-                    string curFg = Inject.ForegroundTitle();
-                    if (lastFg == null)
-                    {
-                        lastFg = curFg;   // 会话第一笔：只记录基线，不拦截
-                    }
-                    else if (curFg != lastFg)
-                    {
-                        lastFg = curFg;
-                        injectedChars = 0;
-                        syncHold = true;
-                        string shortFg = curFg.Length > 30 ? curFg.Substring(0, 30) : curFg;
-                        Log.Info("焦点已切换，暂停实时同步（当前: " + shortFg + "）");
-                        SendNote("电脑窗口已切换（" + shortFg + "），实时同步已暂停并切回手动发送。"
-                            + "放好光标后点「发送」或「重发」，文字没有丢。", "focus_changed");
-                        return true;
-                    }
-                    if (syncHold) { return true; }   // 保持暂停，等手动发送解除
                     object so;
                     string stext = "";
                     if (dict.TryGetValue("text", out so)) stext = (so as string) ?? "";
@@ -1858,7 +1810,6 @@ namespace TypeBridge
                     {
                         Log.Info("同步 退格" + sback + " 注入" + stext.Length + "字符");
                     }
-                    injectedChars = (injectedChars > sback ? injectedChars - sback : 0) + stext.Length;
                     SendAck(true, stext.Length);
                     return true;
                 }
@@ -1903,14 +1854,6 @@ namespace TypeBridge
                 default:
                     return true;    // 未知消息忽略，不断开
             }
-        }
-
-        // 窗口切换检查：前台窗口一变，本会话的「可撤回」配额归零，
-        // 避免手机端把换窗口后的批量退格打到不相干的应用里
-        private void FgCheck()
-        {
-            string fg = Inject.ForegroundTitle();
-            if (fg != lastFg) { injectedChars = 0; lastFg = fg; }
         }
 
         private void SendAck(bool ok, int chars)
