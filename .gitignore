@@ -22,3 +22,6 @@ docs/_*.html
 
 # 日志
 *.log
+
+# Python 编译缓存
+__pycache__/
