@@ -91,6 +91,7 @@ body.live #autoclear{display:inline-block}
 <button id="enter">回车</button>
 <button id="undo">撤回</button>
 <button id="bs">退格</button>
+<button id="resend" title="把最近一次发送的内容重新发到电脑当前光标处（点错窗口/文字丢了时用）">重发</button>
 <button id="plus" title="选一张照片/拍照发到电脑，自动粘贴到电脑当前光标处；上传中再点一次=取消">图片→电脑</button>
 <input type="file" id="file" accept="image/*" style="display:none">
 </div>
@@ -108,10 +109,11 @@ var dot=document.getElementById('dot'),status=document.getElementById('status'),
     coderow=document.getElementById('coderow'),codeinput=document.getElementById('codeinput'),
     codego=document.getElementById('codego'),
     plus=document.getElementById('plus'),fileInput=document.getElementById('file'),
-    origBtn=document.getElementById('orig');
+    origBtn=document.getElementById('orig'),resendBtn=document.getElementById('resend');
 var ws=null,authed=false,lastLen=0,timer=null,authFail=false;
 var backoff=0,BACKOFF_BASE=2000,BACKOFF_MAX=60000;   // 重连指数退避：0=首连/刚连上
 var mode='manual',lastSent='',syncTimer=null,composing=false,pendingSince=0;
+var lastSentFull='';   // 最近一次送达电脑的完整内容（「重发」用：焦点误触/丢字时一键补发，不用重打）
 var hintDefault='',flashTimer=null;
 
 function setSt(on,txt){
@@ -147,7 +149,11 @@ function connect(){
       flash(txt);
       if(up){up=null;upLabel();}   // 一次一张，收到本次结果即结束
     }
-    else if(m.type==='note'){ flash(m.msg||''); }
+    else if(m.type==='note'){
+      flash(m.msg||'');
+      // 电脑端检测到焦点切换（实时同步保护）：自动切回手动模式，文字还在输入框里
+      if(m.reason==='focus_changed'&&mode==='live'){ setMode('manual'); lastSent=''; }
+    }
     else if(m.type==='error'){
       var msg=m.msg||'错误';
       // 确定性拒绝（码失效/被取代）：标记后停止自动重连，改人工输入新码
@@ -181,6 +187,7 @@ function sendText(){
   var t=box.value;
   if(!t){return;}
   if(doSend({type:'text',text:t})){
+    lastSentFull=t;   // 记录最近送达内容，供「重发」使用
     lastLen=t.replace(/\r?\n/g,'\n').length;
     box.value='';
     if(mode==='live'){ lastSent=''; }
@@ -206,7 +213,7 @@ function flushSync(){
   var d=calcDiff(lastSent,cur);
   lastSent=cur;
   if(d.back===0&&!d.suffix){return;}
-  doSend({type:'sync',back:d.back,text:d.suffix});
+  if(doSend({type:'sync',back:d.back,text:d.suffix})){ lastSentFull=cur; }
   armAutoClear();
 }
 
@@ -465,6 +472,19 @@ document.getElementById('undo').onclick=function(){
     return;
   }
   if(lastLen>0){doSend({type:'backspace',count:lastLen});lastLen=0;}
+};
+// 重发：把最近一次送达电脑的内容重新发到当前光标处（焦点误触/丢字时的补救，不用重打）
+resendBtn.onclick=function(){
+  if(!ws||ws.readyState!==1||!authed){ flash('尚未连接电脑'); return; }
+  var t=lastSentFull;
+  if(!t){ flash('还没有可重发的内容'); return; }
+  if(mode==='live'){ setMode('manual'); lastSent=''; }   // 重发是恢复动作，切回手动最直观
+  if(doSend({type:'text',text:t})){
+    lastLen=t.replace(/\r?\n/g,'\n').length;
+    flash('已重发 '+t.length+' 字到电脑光标处');
+    send.classList.add('sent');
+    setTimeout(function(){send.classList.remove('sent');},300);
+  } else { flash('连接已断开'); }
 };
 document.addEventListener('visibilitychange',function(){
   // 回到前台且连接已断：重置退避并立即重连

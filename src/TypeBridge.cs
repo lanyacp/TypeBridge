@@ -346,6 +346,8 @@ namespace TypeBridge
     {
         internal static bool Paused = false;
         internal static volatile int ClientCount = 0;
+        // 最近一次手机发来的完整文字（托盘「重放上次输入」用）
+        internal static string LastText = null;
     }
 
     // ---------------- 剪贴板/粘贴网关 ----------------
@@ -790,7 +792,7 @@ namespace TypeBridge
     // ---------------- 版本与更新地址 ----------------
     internal static class AppInfo
     {
-        internal const string Version = "v0.7";
+        internal const string Version = "v0.8";
         internal const string UpdateUrl = "https://gitee.com/lanyacp/TypeBridge";
         internal const string UpdateUrlText = "gitee.com/lanyacp/TypeBridge";
     }
@@ -1568,6 +1570,8 @@ namespace TypeBridge
         // 前台窗口一变，配额归零——批量退格只允许删自己注进去的内容
         private int injectedChars;
         private string lastFg;
+        // 焦点切换保护：实时同步时目标窗口一变就暂停灌入，文字留在手机输入框不丢
+        private bool syncHold;
 
         internal WsSession(TcpClient client, NetworkStream stream, string request)
         {
@@ -1608,12 +1612,13 @@ namespace TypeBridge
             catch (Exception) { }
         }
 
-        // 给手机发一条普通提示（不标红不改连接状态）：粘贴真实结果/取消确认
-        internal void SendNote(string msg)
+        // 给手机发一条普通提示（不标红不改连接状态）：粘贴真实结果/取消确认/焦点切换
+        internal void SendNote(string msg, string reason = null)
         {
             Dictionary<string, object> note = new Dictionary<string, object>();
             note["type"] = "note";
             note["msg"] = msg;
+            if (reason != null) note["reason"] = reason;
             try { SendJson(note); }
             catch (Exception) { }
         }
@@ -1756,6 +1761,8 @@ namespace TypeBridge
                     if (text.Length > 10000) { SendError("单次最多1万字符"); return true; }
                     if (State.Paused) { SendError("注入已暂停"); return true; }
                     FgCheck();
+                    syncHold = false;   // 手动发送=用户已放好光标，解除同步暂停
+                    State.LastText = text;
                     uint sent = Inject.Text(text);
                     injectedChars += text.Length;
                     Log.Info("注入 " + text.Length + " 字符 (" + sent + " 事件)");
@@ -1811,7 +1818,26 @@ namespace TypeBridge
                     // 实时同步：原子完成「退格 N 次 + 输入增量文本」
                     // 客户端把输入框当作电脑上文本的镜像，算最长公共前缀求增量
                     if (State.Paused) { SendError("注入已暂停"); return true; }
-                    FgCheck();
+                    // 焦点切换保护：注入目标窗口变了（用户误触点了别处），继续灌会把
+                    // 后面的文字送进错误窗口。这里拒绝本条增量并通知手机自动切回手动——
+                    // 文字还在手机输入框里，放好光标后点「发送」或「重发」即可，不用重打。
+                    string curFg = Inject.ForegroundTitle();
+                    if (lastFg == null)
+                    {
+                        lastFg = curFg;   // 会话第一笔：只记录基线，不拦截
+                    }
+                    else if (curFg != lastFg)
+                    {
+                        lastFg = curFg;
+                        injectedChars = 0;
+                        syncHold = true;
+                        string shortFg = curFg.Length > 30 ? curFg.Substring(0, 30) : curFg;
+                        Log.Info("焦点已切换，暂停实时同步（当前: " + shortFg + "）");
+                        SendNote("电脑窗口已切换（" + shortFg + "），实时同步已暂停并切回手动发送。"
+                            + "放好光标后点「发送」或「重发」，文字没有丢。", "focus_changed");
+                        return true;
+                    }
+                    if (syncHold) { return true; }   // 保持暂停，等手动发送解除
                     object so;
                     string stext = "";
                     if (dict.TryGetValue("text", out so)) stext = (so as string) ?? "";
@@ -2225,6 +2251,28 @@ namespace TypeBridge
                 catch (Exception) { }
             });
             menu.MenuItems.Add("设置接收文件夹位置…", delegate { ChooseRecvDir(); });
+            // 焦点被误触切走导致文字丢了？点好光标位置后一键重放最近一次内容
+            menu.MenuItems.Add("重放上次输入", delegate
+            {
+                string t = State.LastText;
+                if (string.IsNullOrEmpty(t))
+                {
+                    tray.ShowBalloonTip(1500, "TypeBridge",
+                        "还没有可重放的内容（重放最近一次手机发来的文字）", ToolTipIcon.Info);
+                    return;
+                }
+                string replay = t;
+                ThreadPool.QueueUserWorkItem(delegate(object o)
+                {
+                    try
+                    {
+                        Inject.Text(replay);
+                        PasteGate.Notify("已重放上次输入（" + replay.Length + " 字）到当前光标处");
+                        Log.Info("托盘重放上次输入 " + replay.Length + " 字");
+                    }
+                    catch (Exception ex) { Log.Info("重放失败: " + ex.Message); }
+                });
+            });
             // 最近接收：子菜单弹出时实时列目录，点条目直接打开对应文件
             MenuItem recentItem = new MenuItem("最近接收");
             recentItem.Popup += delegate
